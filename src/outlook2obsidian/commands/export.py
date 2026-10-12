@@ -72,6 +72,9 @@ RE_TITLE_WHITESPACE = re.compile(r"\s+")
 # Simple detection if filter/search critera contain 'and' or 'or' conditions.
 RE_AND_OR = re.compile(r"\s(and|or)\s", re.IGNORECASE)
 
+# Tag and property variables in the format '{tag.propertyName}'
+RE_TAG_VAR = re.compile(r"{[a-zA-Z.]+}")
+
 # Message fields we reference for exporting
 EXPORT_MESSAGE_FIELDS = [
     "body",
@@ -380,6 +383,54 @@ def _clean_tags(tags: list[str]) -> list[str]:
     return tags
 
 
+def _expand_vars_dict(d: NoteMetaPropT, prop_vars: dict[str, str]) -> NoteMetaPropT:
+    """Expand dynamic variable references in a dictionary of metadata properties.
+
+    Args:
+        d (NoteMetaPropT): Dictionary of properties to expand.
+        prop_vars (dict[str, str]): Dictionary of replacement patterns.
+
+    Returns:
+        NoteMetaPropT: Updated dictionary with message-related placeholders expanded.
+    """
+
+    def _varrepl(m: re.Match) -> str:
+        var_name: str = m.group(0)
+        return prop_vars.get(var_name, var_name)
+
+    if not d:
+        return {}
+
+    d = d.copy()  # don't modify caller
+
+    for key, value in d.items():
+        if isinstance(value, str):
+            d[key] = RE_TAG_VAR.sub(_varrepl, value)
+
+    return d
+
+
+def _expand_vars_list(lst: list[str], prop_vars: dict[str, str]) -> list[str]:
+    """Expand dynamic variable references in a list of tags.
+
+    Args:
+        lst (list[str]): List of tags or metadata properties to expand.
+        prop_vars (dict[str, str]): Dictionary of replacement patterns.
+
+    Returns:
+        list[str]: New list with dynamic placeholders expanded.
+    """
+
+    def _varrepl(m: re.Match) -> str:
+        var_name: str = m.group(0)
+        return prop_vars.get(var_name, var_name)
+
+    if not lst:
+        return []
+
+    return [RE_TAG_VAR.sub(_varrepl, _tag) for _tag in lst]
+
+
 def _expand_folder_tags(
     folder: GraphFolderT,
     tags: list[str] | None,
@@ -398,11 +449,7 @@ def _expand_folder_tags(
     if not tags:
         return None
 
-    # Create a pattern that searches for all replacement substrings simultaneously in a single pass
-    pattern = re.compile("|".join(re.escape(key) for key in tag_vars))
-
-    # Replace placeholders, do not modify original
-    tags = [pattern.sub(lambda match: tag_vars[match.group(0)], _tag) for _tag in tags]
+    tags = _expand_vars_list(tags, tag_vars)
 
     add_tags: list[str] = []
     remove_tags: set[int] = set()
@@ -419,29 +466,6 @@ def _expand_folder_tags(
         tags.extend(add_tags)
 
     return tags
-
-
-def _expand_message_tags(
-    tags: list[str] | None,
-    tag_vars: dict[str, str],
-) -> list[str]:
-    """Expand tags for a message.
-
-    Args:
-        tags (list[str] | None): List of tags to expand.
-        tag_vars (dict[str, str]): Dictionary of replacement patterns.
-
-    Returns:
-        list[str]: Updated list of tags with message-related placeholders expanded.
-    """
-    if not tags:
-        return []
-
-    # Create a pattern that searches for all replacement substrings simultaneously in a single pass
-    pattern = re.compile("|".join(re.escape(key) for key in tag_vars))
-
-    # Replace placeholders, do not modify original
-    return [pattern.sub(lambda match: tag_vars[match.group(0)], _tag) for _tag in tags]
 
 
 def _expand_folder_metaprop(
@@ -465,29 +489,26 @@ def _expand_folder_metaprop(
     if not metaprop:
         return None
 
-    # Create a pattern that searches for all replacement substrings simultaneously in a single pass
-    pattern = re.compile("|".join(re.escape(key) for key in prop_vars))
+    metaprop = _expand_vars_dict(metaprop, prop_vars)
 
-    # Replace placeholders, do not modify original
     for name, value in metaprop.items():
-        if isinstance(value, str):
-            metaprop[name] = pattern.sub(lambda match: prop_vars[match.group(0)], value)
-
-            if "{folder.folderPath.parts}" in value:
-                # Frontmatter can include list types so we can simply pass it along
-                path_parts = Path(folder["folderPath"]).parts
-                metaprop[name] = path_parts[0] if len(path_parts) == 1 else path_parts
+        if isinstance(value, str) and "{folder.folderPath.parts}" in value:
+            # Frontmatter can include list types so we can simply pass it along
+            path_parts = Path(folder["folderPath"]).parts
+            metaprop[name] = path_parts[0] if len(path_parts) == 1 else path_parts
 
     return metaprop
 
 
-def _expand_note_metaprop(metaprop: NoteMetaPropT | None, prop_vars: dict[str, str], frontmatter: FrontmatterT) -> None:
-    """Expand metadata properties for a note and add them to frontmatter.
+def _init_note_frontmatter(metaprop: NoteMetaPropT | None, prop_vars: dict[str, str]) -> FrontmatterT:
+    """Initialize note frontmatter with expanded metadata properties.
 
     Args:
-        metaprop (MetaPropT | None): Dictionary of metadata properties to expand.
+        metaprop (NoteMetaPropT | None): Dictionary of metadata properties to expand.
         prop_vars (dict[str, str]): Dictionary of replacement patterns.
-        frontmatter (FrontmatterT): Frontmatter dictionary. Frontmatter properties will be added here if applicable.
+
+    Returns:
+        FrontmatterT: Initialized frontmatter dictionary.
     """
 
     def is_float(value: str) -> bool:
@@ -497,26 +518,24 @@ def _expand_note_metaprop(metaprop: NoteMetaPropT | None, prop_vars: dict[str, s
             return False
         return True
 
-    if metaprop:
-        # Create a pattern that searches for all replacement substrings simultaneously in a single pass
-        pattern = re.compile("|".join(re.escape(key) for key in prop_vars))
+    frontmatter: FrontmatterT = {}
 
-        for key, value in metaprop.items():
-            if isinstance(value, str):
-                # Replace placeholders
-                new_value = pattern.sub(lambda match: prop_vars[match.group(0)], value)
+    metaprop = _expand_vars_dict(metaprop or {}, prop_vars)
 
-                # Properties support some scalar types
-                if new_value.isdecimal():
-                    frontmatter[key] = int(new_value)
-                elif "." in value and is_float(new_value):
-                    frontmatter[key] = Decimal(new_value)
-                elif new_value.lower() in ("true", "false"):
-                    frontmatter[key] = new_value.lower() == "true"
-                else:
-                    frontmatter[key] = new_value
-            else:
-                frontmatter[key] = value
+    # Properties support some scalar types
+    for key, value in metaprop.items():
+        if not isinstance(value, str):
+            frontmatter[key] = value
+        elif value.isdecimal():
+            frontmatter[key] = int(value)
+        elif "." in value and is_float(value):
+            frontmatter[key] = Decimal(value)
+        elif value.lower() in ("true", "false"):
+            frontmatter[key] = value.lower() == "true"
+        else:
+            frontmatter[key] = value
+
+    return frontmatter
 
 
 def _append_note_tags(
@@ -525,19 +544,19 @@ def _append_note_tags(
     tag_vars: dict[str, str],
     frontmatter: FrontmatterT,
 ) -> str:
-    """Append tags to note content.
+    """Append tags to note content and/or frontmatter.
 
     Args:
         note_content (str): Note content.
         export_opts (ExportOptions): Export options.
-        frontmatter (FrontmatterT): Frontmatter dictionary. Frontmatter tags will be added here if applicable.
         tag_vars (dict[str, str]): Dictionary of replacement patterns.
+        frontmatter (FrontmatterT): Frontmatter dictionary. Frontmatter tags will be added here if applicable.
 
     Returns:
         str
     """
-    body_tags = _expand_message_tags(export_opts.note_body_tags, tag_vars)
-    frontmatter_tags = _expand_message_tags(export_opts.note_tags, tag_vars)
+    body_tags = _expand_vars_list(export_opts.note_body_tags or [], tag_vars)
+    frontmatter_tags = _expand_vars_list(export_opts.note_tags or [], tag_vars)
 
     if not export_opts.place_tags_frontmatter:
         # Place all tags in body
@@ -620,7 +639,6 @@ def _export_message(  # noqa: C901, PLR0912, PLR0915
     content_type: str | None = message.get("body", {}).get("contentType")
     has_attachments: bool | None = message.get("hasAttachments")
     message_out_path = _unique_out_path(vault_dir / Path(title + ".md"))
-    frontmatter: FrontmatterT = {}
     dt_now = datetime.now(tz=timezone.utc)  # noqa: UP017
     note_content = body_content
 
@@ -697,7 +715,7 @@ def _export_message(  # noqa: C901, PLR0912, PLR0915
         "{message.subject}": subject,
     }
 
-    _expand_note_metaprop(export_opts.note_metaprop, metaprop_vars, frontmatter)
+    frontmatter = _init_note_frontmatter(export_opts.note_metaprop, metaprop_vars)
 
     note_content = _append_note_tags(note_content, export_opts, tag_vars, frontmatter)
 
