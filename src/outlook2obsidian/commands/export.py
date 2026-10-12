@@ -82,6 +82,7 @@ EXPORT_MESSAGE_FIELDS = [
     "receivedDateTime",
     "sentDateTime",
     "subject",
+    "hasAttachments",
 ]
 
 EXPECTED_MESSAGE_FIELDS_SET = GRAPH_MESSAGE_FIELDS_SET | {"@odata.etag"}
@@ -112,6 +113,17 @@ class FilterJoinCond(StrEnum):
     cond_or = "or"
 
 
+class ExportStat(StrEnum):
+    """Export statistic messages."""
+
+    STAT_NOTE_CREATED = "Notes created"
+    STAT_SKIPPED_DUPLICATE = "Skipped; Message already exported"
+    STAT_SKIPPED_MARKDOWN_CONVERSION_FAILED = "Skipped; Markdown conversion failed"
+    STAT_SKIPPED_NO_MESSAGE_BODY = "Skipped; No message body"
+    STAT_SKIPPED_NO_MESSAGE_CONTENT_JUST_ATTACHMENTS = "Skipped; No message content, just attachments"
+    STAT_SKIPPED_NO_MESSAGE_CONTENT_NO_ATTACHMENTS = "Skipped; No message content, no attachments"
+
+
 @dataclass
 class ExportOptions:
     """Export command options."""
@@ -129,6 +141,8 @@ class ExportOptions:
     search_query: str | None  # --search criteria from command line and config file.
     vault_dir: Path  # Vault directory to save exported messages.
 
+
+ExportStatsT = dict[ExportStat, int]
 
 ######################################################################
 # Helpers
@@ -162,6 +176,17 @@ def _logger_friendly_progress(*args, **kwargs) -> Generator[Progress]:  # noqa: 
         for handler, prior_stderr in __streamhandlers:
             if prior_stderr is not None:
                 handler.setStream(prior_stderr)
+
+
+def _exportstat_incr(export_stats: ExportStatsT, stat: ExportStat, incr: int = 1) -> None:
+    """Increment specified export stat.
+
+    Args:
+        export_stats (ExportStatsT): Export stats dictionary.
+        stat (ExportStat): Stat to increment.
+        incr (int, optional): Increment amount. Defaults to 1.
+    """
+    export_stats[stat] = export_stats.get(stat, 0) + incr
 
 
 def _opt_metaprop_callback(
@@ -238,14 +263,15 @@ def _merge_metaprops(a: NoteMetaPropT, b: NoteMetaPropT | None) -> NoteMetaPropT
     return c
 
 
-def _message_warn(message: GraphMessageT, errmsg: str) -> None:
+def _log_message_notice(message: GraphMessageT, errmsg: str, level: int = logging.WARNING) -> None:
     """Log a warning related to a message.
 
     Args:
         message (GraphMessageT): Message object.
         errmsg (str): Warning description.
+        level (int): Logging level code (e.g., logging.WARNING).
     """
-    logger.warning('message("%s"): %s', message["subject"], errmsg)
+    logger.log(level, 'message("%s"): %s', message["subject"], errmsg)
 
 
 def _safe_title(subject: str) -> str:
@@ -293,7 +319,7 @@ def _unique_out_path(p: Path) -> Path:
     return unique_path
 
 
-def _coerce_datetime(message: GraphMessageT, field: str, is_draft: bool) -> datetime | None:  # noqa: FBT001
+def _coerce_datetime(message: GraphMessageT, field: str, is_draft: bool | None) -> datetime | None:  # noqa: FBT001
     """Convert a message datetime string in ISO format into a `datetime` object.
 
     Args:
@@ -307,17 +333,17 @@ def _coerce_datetime(message: GraphMessageT, field: str, is_draft: bool) -> date
     dt = message.get(field)
 
     if field not in message:
-        _message_warn(message, f"field({field}): missing date field")
+        _log_message_notice(message, f"field({field}): missing date field")
     elif not dt:
         if is_draft and field in {"sentDateTime", "receivedDateTime"}:
             pass  # Drafts aren't expected to have sent or received dates
         else:
-            _message_warn(message, f"field({field}): no value")
+            _log_message_notice(message, f"field({field}): no value")
     else:
         try:
             return datetime.fromisoformat(dt)
         except ValueError:
-            _message_warn(message, f"field({field}): unexpected format: '{dt}'")
+            _log_message_notice(message, f"field({field}): unexpected format: '{dt}'")
 
     return None
 
@@ -540,71 +566,63 @@ def _append_note_tags(
     return note_content
 
 
-def _convert_to_markdown(message: GraphMessageT) -> str:
+def _convert_to_markdown(body_content: str) -> str | None:
     """Convert message content to Markdown.
 
     Args:
-        message (GraphMessageT): Message object.
+        body_content (str): The HTML body content of the message.
 
     Returns:
-        str
+        str|None: Note content or None if message has no body or Markdown conversion fails.
     """
-    body_content = message.get("body", {}).get("content")
-    content_type = message.get("body", {}).get("contentType")
-    note_content = ""  # an empty message body is unexpected but not an error condition
+    # https://github.com/matthewwithanm/python-markdownify
+    # from markdownify import markdownify as html_to_md
+    # note_content = html_to_md(body_content)
 
-    if not body_content:
-        _message_warn(message, "body content is missing")
+    # https://github.com/xberg-io/html-to-markdown
+    # https://pypi.org/project/html-to-markdown/
+    # https://docs.html-to-markdown.xberg.io/reference/api-python/
 
-    elif content_type == "text":
-        note_content = body_content
+    # Disable metadata extraction to prevent Microsoft Word custom <meta> tags from being added to the frontmatter.
+    # I couldn't find a way to parse it and suppress the frontmatter altogether :/
+    # Everything is escaped presuming emails aren't meant to include Markdown entities, such as hashtags.
+    opts = ConversionOptions(
+        extract_metadata=False,
+        escape_ascii=True,
+        escape_asterisks=True,
+        escape_misc=True,
+        escape_underscores=True,
+    )
 
-    elif content_type == "html":
-        # https://github.com/matthewwithanm/python-markdownify
-        # from markdownify import markdownify as html_to_md
-        # note_content = html_to_md(body_content)
+    convert_result = convert_to_markdown(body_content, opts)
 
-        # https://github.com/xberg-io/html-to-markdown
-        # https://pypi.org/project/html-to-markdown/
-        # https://docs.html-to-markdown.xberg.io/reference/api-python/
-
-        # Disable metadata extraction to prevent Microsoft Word custom <meta> tags from being added to the frontmatter.
-        # I couldn't find a way to parse it and suppress the frontmatter altogether :/
-        # Everything is escaped presuming emails aren't meant to include Markdown entities, such as hashtags.
-        opts = ConversionOptions(
-            extract_metadata=False,
-            escape_ascii=True,
-            escape_asterisks=True,
-            escape_misc=True,
-            escape_underscores=True,
-        )
-
-        convert_result = convert_to_markdown(body_content, opts)
-        note_content = convert_result.content
-
-        if not note_content:
-            note_content = body_content
-            _message_warn(message, "HTML to Markdown conversion resulted in empty content, using original HTML body")
-    else:
-        _message_warn(message, f"field('contentType'): unexpected type: '{content_type}'")
-
-    return note_content
+    return convert_result.content
 
 
-def _export_message(message: GraphMessageT, vault_dir: Path, export_opts: ExportOptions) -> None:
+def _export_message(  # noqa: C901, PLR0912, PLR0915
+    message: GraphMessageT,
+    vault_dir: Path,
+    export_opts: ExportOptions,
+    export_stats: ExportStatsT,
+) -> None:
     """Export a message.
 
     Args:
         message (MessageT): The message.
         vault_dir (Path): The directory to export the message to.
         export_opts (ExportOptions): Export options.
+        export_stats (ExportStatsDict): Export statistics dictionary to update.
     """
-    subject = message.get("subject", TITLE_UNTITLED)
+    subject: str = message.get("subject", TITLE_UNTITLED)
     title = _safe_title(subject)
-    is_draft = message.get("isDraft", False)
+    is_draft: bool | None = message.get("isDraft")
+    body_content: str | None = message.get("body", {}).get("content")
+    content_type: str | None = message.get("body", {}).get("contentType")
+    has_attachments: bool | None = message.get("hasAttachments")
     message_out_path = _unique_out_path(vault_dir / Path(title + ".md"))
     frontmatter: FrontmatterT = {}
     dt_now = datetime.now(tz=timezone.utc)  # noqa: UP017
+    note_content = body_content
 
     # Convert date values into datetime objects
     message_dates = {
@@ -620,7 +638,7 @@ def _export_message(message: GraphMessageT, vault_dir: Path, export_opts: Export
     if not message_date:
         # Seems improbable but just in case!
         message_date = dt_now
-        _message_warn(message, "all date fields are missing, using current UTC time")
+        _log_message_notice(message, "all date fields are missing, using current UTC time")
 
     # I've seen Outlook report funny things for dates.
     message_dates["createdDateTime"] = min(
@@ -634,7 +652,26 @@ def _export_message(message: GraphMessageT, vault_dir: Path, export_opts: Export
         message_dates.get("receivedDateTime") or message_date,
     )
 
-    note_content = _convert_to_markdown(message)
+    if body_content:
+        if content_type == "html":
+            note_content = _convert_to_markdown(body_content)
+        elif content_type != "text":
+            _log_message_notice(message, f"field('contentType'): unexpected type: '{content_type}'")
+
+    if not note_content:
+        if body_content is None:
+            stat, level = ExportStat.STAT_SKIPPED_NO_MESSAGE_BODY, logging.WARNING
+        elif note_content is None:
+            stat, level = ExportStat.STAT_SKIPPED_MARKDOWN_CONVERSION_FAILED, logging.WARNING
+        elif has_attachments:
+            stat, level = ExportStat.STAT_SKIPPED_NO_MESSAGE_CONTENT_JUST_ATTACHMENTS, logging.INFO
+        else:
+            stat, level = ExportStat.STAT_SKIPPED_NO_MESSAGE_CONTENT_NO_ATTACHMENTS, logging.INFO
+
+        _exportstat_incr(export_stats, stat)
+        _log_message_notice(message, stat.value, level)
+
+        return  # don't write empty notes
 
     tag_vars = {}
 
@@ -675,6 +712,8 @@ def _export_message(message: GraphMessageT, vault_dir: Path, export_opts: Export
     else:
         logger.debug("Wrote note to '%s' (dry run)", message_out_path.name)
 
+    _exportstat_incr(export_stats, ExportStat.STAT_NOTE_CREATED)
+
 
 def _export_folder_batch(  # noqa: PLR0913, PLR0917
     session: sessions.Session,
@@ -688,7 +727,8 @@ def _export_folder_batch(  # noqa: PLR0913, PLR0917
     exported_ids: set[str],
     vault_dir: Path,
     export_opts: ExportOptions,
-) -> tuple[set[str], str | None]:
+    export_stats: ExportStatsT,
+) -> tuple[set[str], int, str | None]:
     """Export a batch of messages from a specific folder.
 
     Args:
@@ -703,9 +743,11 @@ def _export_folder_batch(  # noqa: PLR0913, PLR0917
         exported_ids (set[str]): The set of message IDs that have already been exported.
         vault_dir (Path): The directory to export the messages to.
         export_opts (ExportOptions): Options for exporting messages.
+        export_stats (ExportStats): Export statistics dictionary to update.
 
     Returns:
-        tuple[set[str], str | None]: [set(Message-Id), Link to next batch of messages or None if there are no more batches]
+        tuple[set[str], int, str | None]: [set(Message-Id), Number of messages exported in this batch (including dups),
+            Link to next batch of messages or None if there are no more batches]
 
     Raises:
         requests.RequestException derived error.
@@ -718,8 +760,10 @@ def _export_folder_batch(  # noqa: PLR0913, PLR0917
 
     for message in messages:
         if message["id"] not in exported_ids:
-            _export_message(message, vault_dir, export_opts)
+            _export_message(message, vault_dir, export_opts, export_stats)
             batch_ids.add(message["id"])
+        else:
+            _exportstat_incr(export_stats, ExportStat.STAT_SKIPPED_DUPLICATE)
 
         progress.update(progress_task, advance=1)
 
@@ -727,7 +771,7 @@ def _export_folder_batch(  # noqa: PLR0913, PLR0917
         if batch_limit <= 0:
             break
 
-    return batch_ids, next_url
+    return batch_ids, len(messages), next_url
 
 
 def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
@@ -765,8 +809,7 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         manifest_data = json.loads(manifest_file_path.read_text())
         manifest_ids = set(manifest_data.get("message_ids", []))
 
-    exported_ids = manifest_ids.copy()  # easy way to keep track of dups
-    exported_total_count = len(exported_ids)
+    exported_total_count = len(manifest_ids)
     folder_message_count = folder["totalItemCount"]
     vault_dir = export_opts.vault_dir
 
@@ -775,6 +818,7 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         vault_dir.mkdir(parents=True, exist_ok=True)
 
     if not export_opts.filter_test:
+        console.print()
         console.print(f"[bold]Exporting folder '{folder['folderPath']}':")
         console.print(f"Exporting to '{vault_dir}'")
 
@@ -792,6 +836,11 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         note_metaprop=_expand_folder_metaprop(folder, export_opts.note_metaprop, folder_tag_vars),
     )
 
+    export_stats: ExportStatsT = {
+        # Start with stats that will always be output
+        ExportStat.STAT_NOTE_CREATED: 0,
+    }
+
     # https://learn.microsoft.com/en-us/graph/query-parameters
     params = {
         "$count": "true",
@@ -801,9 +850,11 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
 
     if export_opts.filter_query:
         params["$filter"] = export_opts.filter_query
+        exported_total_count = 0  # Manifest can be used to find dups but we but can't "skip" ahead
 
     elif export_opts.search_query:
         params["$search"] = export_opts.search_query
+        exported_total_count = 0  # Manifest can be used to find dups but we but can't "skip" ahead
 
     else:
         # The Graph API imposes rules when using $orderby and $filter together.
@@ -811,8 +862,9 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         # Orderby multiple fields so order is more deterministic.
         params["$orderby"] = "lastModifiedDateTime,internetMessageId,subject"
 
-        if exported_total_count:
-            params["$skip"] = exported_total_count  # skip already exported messages
+    if exported_total_count:
+        params["$skip"] = exported_total_count  # skip already exported messages
+        _exportstat_incr(export_stats, ExportStat.STAT_SKIPPED_DUPLICATE, incr=exported_total_count)
 
     # https://learn.microsoft.com/en-us/graph/api/resources/mail-api-overview
     # https://learn.microsoft.com/en-us/graph/api/message-get
@@ -896,7 +948,7 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         progress_task = progress.add_task("", total=export_limit, completed=exported_total_count)
 
         while next_url is not None and exported_total_count < export_limit:
-            batch_ids, next_url = _export_folder_batch(
+            batch_ids, batch_total, next_url = _export_folder_batch(
                 session,
                 graph_config,
                 progress,
@@ -908,10 +960,11 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
                 manifest_ids,
                 vault_dir,
                 export_opts,
+                export_stats,
             )
 
-            exported_ids |= batch_ids
-            exported_total_count = len(exported_ids)
+            manifest_ids |= batch_ids
+            exported_total_count += batch_total
             params = None  # included in 'nextLink' automatically
             first_batch_data = None
 
@@ -920,15 +973,15 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
                 # ensures the manifest is mostly up-to-date if an exception occurs.
                 manifest_file_path.write_text(
                     json.dumps(
-                        {"message_ids": list(exported_ids)},
+                        {"message_ids": list(manifest_ids)},
                     ),
                 )
 
-    dup_count = len(exported_ids & manifest_ids)
-    if dup_count:
-        logger.info("%d messages had already been exported.", dup_count)
+                logger.debug("Wrote export manifest: '%s'", manifest_file_path)
 
-    console.print("Folder complete!")
+    console.print("Folder results:")
+    for stat, stat_count in export_stats.items():
+        console.print(f"- {stat}: {stat_count}")
 
 
 def _build_filter_query(
