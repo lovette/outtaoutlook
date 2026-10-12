@@ -1,0 +1,60 @@
+[project]
+name = "outlook2obsidian"
+version = "0.1.0"
+description = "Download messages from Microsoft Outlook using the Microsoft Graph API and save them to an Obsidian vault."
+readme = "README.md"
+authors = [
+    { name = "Lance Lovette", email = "lance.lovette@gmail.com" }
+]
+requires-python = ">=3.14"
+
+dependencies = [
+    "html-to-markdown>=3.17.2",
+    "msal>=1.39.0",
+    "pyyaml>=6.0.3",
+    "requests>=2.34.2",
+    "typer>=0.27.2",
+]
+
+[dependency-groups]
+dev = [
+    "basedpyright>=1.40.2",
+    "ruff>=0.16.10",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.23,<0.13.0"]
+build-backend = "uv_build"
+
+[project.scripts]
+outlook2obsidian = "outlook2obsidian.__main__:app"
+
+# https://beta.ruff.rs/docs/tutorial/#rule-selection
+[tool.ruff]
+line-length = 125
+
+# Always generate Python 3.14-compatible code.
+target-version = "py314"
+
+# https://docs.astral.sh/ruff/rules/
+[tool.ruff.lint]
+select = [
+  "ALL",
+]
+
+ignore = [
+  "CPY001",  # https://docs.astral.sh/ruff/rules/missing-copyright-notice/
+  "ERA001",  # https://docs.astral.sh/ruff/rules/commented-out-code/
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+# https://github.com/microsoft/pyright/blob/main/docs/configuration.md#sample-pyprojecttoml-file
+[tool.pyright]
+include = ["src"]
+typeCheckingMode = "standard"
+pythonVersion = "3.14"
+strictListInference = true
+strictDictionaryInference = true
+strictSetInference = true

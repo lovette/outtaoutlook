@@ -1,0 +1,89 @@
+# Options set in the configuration file can be overridden by command line options.
+
+############################################
+# Options common to all commands
+
+auth_file: "~/outlook2obsidian_cache"
+cache_dir: "$TMPDIR/outlook2obsidian_cache"
+cache_graph_api: true
+verbose: 3
+
+############################################
+# Auth command options
+
+auth:
+  tenant: "Tenant domain or UUID"
+  client: "Client UUID"
+
+############################################
+# Ls command options
+
+ls:
+  maxdepth: 25
+
+############################################
+# Export command options
+#
+# Tags and metadata properties can reference dynamic values such as:
+# - {now.[datetime|date|time|year]}
+# - {note.title} (property only)
+#
+# - {folder.displayName}
+# - {folder.folderPath}
+# - {folder.folderPath.parts}
+#
+# - {message.subject} (property only)
+# - {message.[date|sent|received|created|modified].[datetime|date|time|year]}
+#
+# Tags must be strings and will be normalized to be a valid tag.
+# Metadata property values can be integer, decimal, true/false and list of strings.
+#
+# Use `filter` to export messages matching filter criteria.
+# For guidance on using filters, see:
+# https://learn.microsoft.com/en-us/graph/filter-query-parameter
+#
+# Use `search` to export a subset of messages.
+# When you search messages without specifying message properties,
+# the search targets these default properties: 'from', 'subject', and 'body'.
+# For guidance on using search, see:
+# https://learn.microsoft.com/en-us/graph/search-query-parameter
+#
+# You cannot use `search` and `filter` together.
+
+export:
+  place_tags_frontmatter: true
+  place_tags_body_end: false
+  use_manifest: true
+  limit: 0
+  batch_size: 100
+  mkdir: false
+  dry_run: false
+
+  filter:
+    - "lastModifiedDateTime ge 2026-01-01"
+  filter_cond: "and"
+
+  search:
+    - "subject:foo"
+  search_cond: "and"
+
+  # Metadata properties
+  metaprop:
+    "title": "{note.title}"
+    "subject": "{message.subject}"
+    "created": "{message.created.date}"
+    "modified": "{message.date.date}"
+    "exported": "{now.date}"
+
+  # Frontmatter tags
+  tag:
+    - "Tag 1"
+    - "Tag 2"
+    - "{folder.displayName}"
+    - "{folder.folderPath.parts}"
+    - "{message.date.year}"
+
+  # Body tags
+  body_tag:
+    - "Tag A"
+    - "Tag B"

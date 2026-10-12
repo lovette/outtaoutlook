@@ -1,0 +1,77 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "auth w credentials",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "outlook2obsidian",
+            "console": "integratedTerminal",
+            "args": [
+                "--config-file",
+                "${userHome}/Temp",
+                "auth",
+            ],
+            "justMyCode": true
+        },
+        {
+            "name": "auth force",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "outlook2obsidian",
+            "console": "integratedTerminal",
+            "args": [
+                "--config-file",
+                "${userHome}/Temp",
+                "auth",
+                "--force"
+            ],
+            "justMyCode": true
+        },
+        {
+            "name": "auth info",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "outlook2obsidian",
+            "console": "integratedTerminal",
+            "args": [
+                "--config-file",
+                "${userHome}/Temp",
+                "auth",
+                "--info"
+            ],
+            "justMyCode": true
+        },
+        {
+            "name": "list folders",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "outlook2obsidian",
+            "console": "integratedTerminal",
+            "args": [
+                "-c",
+                "${userHome}/Temp",
+                "ls",
+            ],
+            "justMyCode": true
+        },
+        {
+            "name": "export",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "outlook2obsidian",
+            "console": "integratedTerminal",
+            "args": [
+                "--config-file",
+                "${userHome}/Temp",
+                "export",
+                "Drafts",
+                "${userHome}/Temp/outlook2obsidian",
+            ],
+            "justMyCode": true
+        }
+    ]
+}

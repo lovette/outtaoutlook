@@ -1,0 +1,42 @@
+{
+	"folders": [
+		{
+			"path": "."
+		}
+	],
+	"settings": {
+		"[python]": {
+			"editor.defaultFormatter": "charliermarsh.ruff",
+			"editor.formatOnSave": true,
+			"editor.codeActionsOnSave": {
+				"source.organizeImports": "explicit"
+			}
+		},
+		"[yaml]": {
+			"editor.defaultFormatter": "redhat.vscode-yaml",
+			"editor.insertSpaces": true,
+			"editor.formatOnSave": true,
+			"editor.tabSize": 2,
+		},
+		"files.exclude": {
+			".venv": true,
+			".ruff_cache": true,
+			"*.sublime-*": true,
+			"**/__pycache__": true,
+			"**/*.egg-info": true,
+			"build": true,
+		},
+		"python.analysis.exclude": [
+			".venv",
+			"build",
+			"**/*.egg-info"
+		],
+		"python.analysis.diagnosticMode": "workspace",
+		"git.enabled": false,
+		"makefile.configureOnOpen": false,
+	},
+	"launch": {
+		"version": "0.2.0",
+		"configurations": []
+	}
+}
