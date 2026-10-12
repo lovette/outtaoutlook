@@ -894,24 +894,25 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
     # I'm guessing '@odata.count' is not provided when search results are less than '$top'.
     export_message_count: int = first_batch_data.get("@odata.count") or len(first_batch_messages)
 
-    if not export_message_count:
-        if not folder_message_count:
-            msg = f"'{folder['folderPath']}' contains no messages"
-        elif export_opts.filter_query:
-            msg = f"'{folder['folderPath']}' contains no messages matching 'filter' criteria"
-        elif export_opts.search_query:
-            msg = f"'{folder['folderPath']}' contains no messages matching 'search' criteria"
+    if export_opts.filter_test:
+        if export_opts.filter_query:
+            msg = f"'{folder['folderPath']}': {export_message_count} messages"
         else:
-            msg = f"'{folder['folderPath']}' contains {folder_message_count} messages but Graph API result was empty"
+            msg = f"'{folder['folderPath']}': {export_message_count} messages"
 
         console.print(msg)
         return
 
-    if export_opts.filter_test:
-        if export_opts.filter_query:
-            msg = f"'{folder['folderPath']}' contains {export_message_count} messages matching 'filter' criteria"
+    if not export_message_count:
+        if not folder_message_count:
+            msg = "Folder is empty"
+        elif export_opts.filter_query:
+            msg = "Folder contains no messages matching 'filter' criteria"
+        elif export_opts.search_query:
+            msg = "Folder contains no messages matching 'search' criteria"
         else:
-            msg = f"'{folder['folderPath']}' contains {export_message_count} messages matching 'search' criteria"
+            msg = "Folder contains {folder_message_count} messages but Graph API result was empty"
+
         console.print(msg)
         return
 
