@@ -973,7 +973,11 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
                 # ensures the manifest is mostly up-to-date if an exception occurs.
                 manifest_file_path.write_text(
                     json.dumps(
-                        {"message_ids": list(manifest_ids)},
+                        {
+                            "folderId": folder["id"],
+                            "folderPath": folder["folderPath"],
+                            "message_ids": list(manifest_ids),
+                        },
                     ),
                 )
 
