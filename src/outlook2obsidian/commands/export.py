@@ -11,7 +11,7 @@ import unicodedata
 from collections.abc import Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
@@ -41,6 +41,7 @@ from outlook2obsidian.shared import (
     GraphMessageT,
     NoteMetaPropT,
     console,
+    datetime_now,
     err_console,
     get_graph_config,
     graph_get_folder_by_path,
@@ -322,33 +323,22 @@ def _unique_out_path(p: Path) -> Path:
     return unique_path
 
 
-def _coerce_datetime(message: GraphMessageT, field: str, is_draft: bool | None) -> datetime | None:  # noqa: FBT001
-    """Convert a message datetime string in ISO format into a `datetime` object.
+def _coerce_datetime(dt: str | None) -> datetime | None:
+    """Convert a datetime string in ISO format into a `datetime` object.
 
     Args:
-        message (GraphMessageT): Message object.
-        field (str): Message datetime field.
-        is_draft (bool): True if message is marked as a draft.
+        dt (str | None): Datetime string in ISO format.
 
     Returns:
-        datetime | None: Datetime object if field exists and conversion is successful, otherwise None.
+        datetime | None: Datetime object if conversion is successful, otherwise None.
     """
-    dt = message.get(field)
+    if not dt:
+        return None
 
-    if field not in message:
-        _log_message_notice(message, f"field({field}): missing date field")
-    elif not dt:
-        if is_draft and field in {"sentDateTime", "receivedDateTime"}:
-            pass  # Drafts aren't expected to have sent or received dates
-        else:
-            _log_message_notice(message, f"field({field}): no value")
-    else:
-        try:
-            return datetime.fromisoformat(dt)
-        except ValueError:
-            _log_message_notice(message, f"field({field}): unexpected format: '{dt}'")
-
-    return None
+    try:
+        return datetime.fromisoformat(dt)
+    except ValueError:
+        return None
 
 
 def _clean_tags(tags: list[str]) -> list[str]:
@@ -632,6 +622,46 @@ def _export_message(  # noqa: C901, PLR0912, PLR0915
         export_opts (ExportOptions): Export options.
         export_stats (ExportStatsDict): Export statistics dictionary to update.
     """
+
+    def _fix_dates(message: GraphMessageT, is_draft: bool) -> None:  # noqa: FBT001
+        dt_now = datetime_now()
+
+        for field in ("createdDateTime", "lastModifiedDateTime", "receivedDateTime", "sentDateTime"):
+            value = message.get(field)
+            dt = _coerce_datetime(value)
+
+            if not dt:
+                if field not in message:
+                    _log_message_notice(message, f"field({field}): missing date field")
+                elif is_draft and field in {"sentDateTime", "receivedDateTime"}:
+                    pass  # Drafts aren't expected to have sent or received dates, we'll set something below
+                elif value:
+                    _log_message_notice(message, f"field({field}): unexpected date format: '{value}'")
+                else:
+                    _log_message_notice(message, f"field({field}): no value")
+
+            # Ensure all fields are set to a valid datetime
+            message[field] = dt or dt_now
+
+        # Outlook does crazy things with dates, so we do our best to help them make some kind of sense.
+
+        message["sentDateTime"] = min(message["sentDateTime"], message["receivedDateTime"])
+        message["receivedDateTime"] = max(message["sentDateTime"], message["receivedDateTime"])
+
+        message["createdDateTime"] = min(
+            message["createdDateTime"],
+            message["lastModifiedDateTime"],
+            message["sentDateTime"],
+            message["receivedDateTime"],
+        )
+
+        message["lastModifiedDateTime"] = max(
+            message["createdDateTime"],
+            message["lastModifiedDateTime"],
+            message["sentDateTime"],
+            message["receivedDateTime"],
+        )
+
     subject: str = message.get("subject", TITLE_UNTITLED)
     title = _safe_title(subject)
     is_draft: bool | None = message.get("isDraft")
@@ -639,36 +669,14 @@ def _export_message(  # noqa: C901, PLR0912, PLR0915
     content_type: str | None = message.get("body", {}).get("contentType")
     has_attachments: bool | None = message.get("hasAttachments")
     message_out_path = _unique_out_path(vault_dir / Path(title + ".md"))
-    dt_now = datetime.now(tz=timezone.utc)  # noqa: UP017
+    dt_now = datetime_now()
     note_content = body_content
 
-    # Convert date values into datetime objects
-    message_dates = {
-        field: _coerce_datetime(message, field, is_draft)
-        for field in ("createdDateTime", "lastModifiedDateTime", "receivedDateTime", "sentDateTime")
-    }
+    _fix_dates(message, bool(is_draft))
 
+    note_date: datetime = message["receivedDateTime"] or message["sentDateTime"]
     if is_draft:
-        message_date = message_dates.get("lastModifiedDateTime") or message_dates.get("createdDateTime")
-    else:
-        message_date = message_dates.get("receivedDateTime") or message_dates.get("sentDateTime")
-
-    if not message_date:
-        # Seems improbable but just in case!
-        message_date = dt_now
-        _log_message_notice(message, "all date fields are missing, using current UTC time")
-
-    # I've seen Outlook report funny things for dates.
-    message_dates["createdDateTime"] = min(
-        message_dates.get("createdDateTime") or message_date,
-        message_dates.get("lastModifiedDateTime") or message_date,
-    )
-
-    # I've seen Outlook report funny things for dates.
-    message_dates["sentDateTime"] = min(
-        message_dates.get("sentDateTime") or message_date,
-        message_dates.get("receivedDateTime") or message_date,
-    )
+        note_date = message["lastModifiedDateTime"] or message["createdDateTime"]
 
     if body_content:
         if content_type == "html":
@@ -698,11 +706,11 @@ def _export_message(  # noqa: C901, PLR0912, PLR0915
     # {message.[date|sent|received|created|modified].[datetime|date|time|year]}
     for var_name, dt in (
         ("now", dt_now),
-        ("message.date", message_date),
-        ("message.created", message_dates.get("createdDateTime") or message_date),
-        ("message.modified", message_dates.get("lastModifiedDateTime") or message_date),
-        ("message.received", message_dates.get("receivedDateTime") or message_date),
-        ("message.sent", message_dates.get("sentDateTime") or message_date),
+        ("message.date", note_date),
+        ("message.created", message["createdDateTime"]),
+        ("message.modified", message["lastModifiedDateTime"]),
+        ("message.received", message["receivedDateTime"]),
+        ("message.sent", message["sentDateTime"]),
     ):
         tag_vars[f"{{{var_name}.datetime}}"] = dt.strftime("%Y-%m-%dT%H:%M:%S")
         tag_vars[f"{{{var_name}.date}}"] = dt.strftime("%Y-%m-%d")
@@ -725,7 +733,7 @@ def _export_message(  # noqa: C901, PLR0912, PLR0915
 
     if not export_opts.dry_run:
         message_out_path.write_text(note_content, encoding="utf-8")
-        os.utime(message_out_path, (message_date.timestamp(), message_date.timestamp()))
+        os.utime(message_out_path, (note_date.timestamp(), note_date.timestamp()))
         logger.debug("Wrote note to '%s'", message_out_path.name)
     else:
         logger.debug("Wrote note to '%s' (dry run)", message_out_path.name)

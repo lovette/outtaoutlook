@@ -210,6 +210,15 @@ logger = logging.getLogger(APP_NAME)  # initialized in __main__
 # Helpers
 
 
+def datetime_now() -> datetime:
+    """Return current datetime in UTC.
+
+    Returns:
+        datetime
+    """
+    return datetime.now(tz=timezone.utc)  # noqa: UP017
+
+
 def get_token_cache_info(auth_file_path: Path) -> CachedAccessTokenInfo | None:
     """Retrieve information from the token cache if it exists.
 
