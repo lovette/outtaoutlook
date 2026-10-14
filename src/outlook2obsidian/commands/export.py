@@ -1,12 +1,16 @@
 """outlook2obsidian export command."""
 
+import base64
+import binascii
 import copy
 import hashlib
 import json
 import logging
+import mimetypes
 import os
 import re
 import sys
+import textwrap
 import unicodedata
 from collections.abc import Sequence
 from contextlib import contextmanager
@@ -16,6 +20,7 @@ from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
+from urllib.parse import unquote
 
 import requests
 import typer
@@ -37,6 +42,7 @@ from outlook2obsidian.shared import (
     CommandContext,
     GraphApiConfig,
     GraphApiReturnT,
+    GraphAttachmentT,
     GraphFolderT,
     GraphMessageT,
     NoteMetaPropT,
@@ -46,6 +52,7 @@ from outlook2obsidian.shared import (
     get_graph_config,
     graph_get_folder_by_path,
     graph_get_resource,
+    path_with_vars,
 )
 
 if TYPE_CHECKING:
@@ -59,8 +66,19 @@ logger = logging.getLogger(APP_NAME)  # initialized in __main__
 # Constants
 
 TITLE_UNTITLED = "Untitled"
-TITLE_MAXLEN = 255  # macOS limit
+TITLE_MAXLEN = 255 - 5  # macOS limit minus a few characters for `_unique_out_path`
 MIN_PROGRESS_THRESHOLD = 10  # Hide progress if only a few messages
+
+ATTACHMENT_DEFAULT_SUFFIX = ".bin"
+ATTACHMENT_DEFAULT_NAME = "unnamed"  # suffix will be guessed
+ATTACHMENTS_DEFAULT_FOLDER = "assets"
+ATTACHMENTS_FOLDER_NOTE = "note"
+ATTACHMENTS_FOLDER_VAULT = "vault"
+
+# https://learn.microsoft.com/en-us/graph/api/attachment-get
+ATTACHMENT_DATATYPE_FILE = "#microsoft.graph.fileAttachment"
+ATTACHMENT_DATATYPE_ITEM = "#microsoft.graph.itemAttachment"
+ATTACHMENT_DATATYPE_REFERENCE = "#microsoft.graph.referenceAttachment"
 
 # These are banned outright: \/:
 # Links do not work if title includes: #^[]|
@@ -121,29 +139,35 @@ class ExportStat(StrEnum):
     """Export statistic messages."""
 
     STAT_NOTE_CREATED = "Notes created"
+    STAT_ATTACHMENT_LINKED = "Attachments linked"
     STAT_SKIPPED_DUPLICATE = "Skipped; Message already exported"
     STAT_SKIPPED_MARKDOWN_CONVERSION_FAILED = "Skipped; Markdown conversion failed"
     STAT_SKIPPED_NO_MESSAGE_BODY = "Skipped; No message body"
     STAT_SKIPPED_NO_MESSAGE_CONTENT_JUST_ATTACHMENTS = "Skipped; No message content, just attachments"
     STAT_SKIPPED_NO_MESSAGE_CONTENT_NO_ATTACHMENTS = "Skipped; No message content, no attachments"
+    STAT_SKIPPED_NO_MESSAGE_CONTENT_UNKNOWN = "Skipped; No message content, unknown reason"
 
 
 @dataclass
 class ExportOptions:
     """Export command options."""
 
+    attachments_folder: str | Path  # `ATTACHMENTS_FOLDER_*`, folder name or absolute path.
+    attachments_mkdir: bool  # Create mail folder hierarchy in attachments directory.
     dry_run: bool  # Whether to perform a dry run without making any changes.
     filter_query: str | None  # --filter criteria from command line and config file.
     filter_test: bool  # Whether to perform a filter test without exporting.
-    folder_mkdir: bool  # Whether to create the vault directory if it does not exist.
+    notes_mkdir: bool  # Create mail folder hierarchy in notes directory.
     graph_config: GraphApiConfig  # Graph API configuration.
     note_body_tags: list[str] | None  # --body-tag tags from command line and config file.
     note_metaprop: NoteMetaPropT | None  # --metaprop properties from command line and config file.
     note_tags: list[str] | None  # --tag tags from command line and config file.
+    notes_dir: Path  # Directory to save notes (set internally.)
     place_tags_body_end: bool  # True to place body tags at the end of the note instead the top.
     place_tags_frontmatter: bool  # True to place non-body tags in frontmatter.
     search_query: str | None  # --search criteria from command line and config file.
-    vault_dir: Path  # Vault directory to save exported messages.
+    vault_dir: Path  # Root vault directory (set by user.)
+    with_attachments: bool  # Whether to download and link attachments to notes.
 
 
 ExportStatsT = dict[ExportStat, int]
@@ -193,6 +217,36 @@ def _exportstat_incr(export_stats: ExportStatsT, stat: ExportStat, incr: int = 1
     export_stats[stat] = export_stats.get(stat, 0) + incr
 
 
+def _opt_attachments_folder_callback(attachments_folder: str) -> str:
+    """Handle `--attachments-folder` command option.
+
+    Args:
+        attachments_folder (str): Command line option value.
+
+    Returns:
+        str: Special keyword, valid folder name or absolute path.
+    """
+    # Special keywords.
+    if attachments_folder.upper() == ATTACHMENTS_FOLDER_VAULT or attachments_folder.startswith(ATTACHMENTS_FOLDER_NOTE):
+        return attachments_folder
+
+    # Name of subfolder such as "assets" or "attachments".
+    if len(Path(attachments_folder).parts) == 1:
+        if attachments_folder != _safe_title(attachments_folder, ""):
+            errmsg = f"'{attachments_folder}' is not a valid attachments directory name."
+            raise typer.BadParameter(errmsg)
+
+        return attachments_folder
+
+    # Absolute or relative path to a directory optionally with ~ or $ENV variables.
+    attachments_dir_path = path_with_vars(attachments_folder)
+    if attachments_dir_path.is_dir():
+        return str(attachments_dir_path)
+
+    errmsg = f"Directory '{attachments_folder}' does not exist."
+    raise typer.BadParameter(errmsg)
+
+
 def _opt_metaprop_callback(
     ctx: typer.Context,
     param: typer.CallbackParam,  # noqa: ARG001
@@ -202,7 +256,7 @@ def _opt_metaprop_callback(
 
     Note:
         The values of `default_map` are used as the default values for command options.
-        This function is called even if `--config-file` is not specified.
+        This function is called even if option is not specified.
         Duplicate keys are merged into a list of values
 
     Args:
@@ -278,22 +332,27 @@ def _log_message_notice(message: GraphMessageT, errmsg: str, level: int = loggin
     logger.log(level, 'message("%s"): %s', message["subject"], errmsg)
 
 
-def _safe_title(subject: str) -> str:
+def _safe_title(subject: str, default: str) -> str:
     """Clean up title so it is safe to be used as a file name.
 
     Args:
         subject (str): Message subject.
+        default (str): Default title if subject is empty.
 
     Returns:
         str
     """
+    subject = subject.replace(":", " ")  # Common separator so we'll replace it with a safe character.
     subject = RE_TITLE_IGNORECHARS.sub("", subject)
-    subject = RE_TITLE_WHITESPACE.sub(" ", subject).strip().lstrip(".")
+    subject = RE_TITLE_WHITESPACE.sub(" ", subject)
 
     if len(subject) > TITLE_MAXLEN:
-        subject = subject[:TITLE_MAXLEN].rsplit(" ", 1)[0]
+        # Truncate text while preserving whole words if possible
+        subject = textwrap.shorten(subject, width=TITLE_MAXLEN, placeholder="")
 
-    return subject or TITLE_UNTITLED
+    subject = subject.strip(" .")
+
+    return subject or default
 
 
 def _unique_out_path(p: Path) -> Path:
@@ -608,17 +667,261 @@ def _convert_to_markdown(body_content: str) -> str | None:
     return convert_result.content
 
 
-def _export_message(  # noqa: C901, PLR0912, PLR0915
+def _list_attachments(
+    session: sessions.Session,
+    graph_config: GraphApiConfig,
     message: GraphMessageT,
-    vault_dir: Path,
+) -> list[GraphAttachmentT]:
+    """List properties for all message attachments.
+
+    Args:
+        session (sessions.Session): The requests session to pool requests.
+        graph_config (GraphApiConfig): Graph API configuration.
+        message (GraphMessageT): Message properties.
+
+    Returns:
+        list[GraphAttachmentT]
+    """
+    # Best I can tell, '/attachments' returns all attachments and has no 'nextLink'
+    url = f"{GRAPH_API_URL}/me/messages/{message.get('id')}/attachments"
+    data = graph_get_resource(session, graph_config, url)
+    return data.get("value", [])
+
+
+def _get_attachment_content(  # noqa: C901
+    session: sessions.Session,
+    graph_config: GraphApiConfig,
+    message: GraphMessageT,
+    attachment: GraphAttachmentT,
+    attachment_name_prefix: str,
+) -> tuple[str | None, str | None]:
+    """Get attachment content and ensure 'name' property is appropriate and valid.
+
+    Args:
+        session (sessions.Session): The requests session to pool requests.
+        graph_config (GraphApiConfig): Graph API configuration.
+        message (GraphMessageT): Message properties.
+        attachment (GraphAttachmentT): Attachment properties.
+        attachment_name_prefix (str): Prefix to prepend to attachment filenames. Must be filename safe.
+
+    Returns:
+        tuple[str, str]: Attachment content bytes and content type.
+    """
+
+    def _warn_attachment(name: Path, errmsg: str, level: int = logging.WARNING) -> None:
+        _log_message_notice(message, f'attachment("{name}"): {errmsg}', level)
+
+    def _get_item_expanded_content() -> tuple[dict[str, Any], str | None]:
+        # Get properties of the attached contact, event, or message.
+        url = f"{GRAPH_API_URL}/me/messages/{message.get('id')}/attachments/{attachment.get('id')}"
+        params = {"$expand": "microsoft.graph.itemattachment/item"}
+        data = graph_get_resource(session, graph_config, url, params=params)
+        item = data.get("item", {})
+        return item, item.get("@odata.type")
+
+    def _get_item_value() -> tuple[str | None, str | None]:
+        # Get raw attachment content for a contact, event or message.
+        url = f"{GRAPH_API_URL}/me/messages/{message.get('id')}/attachments/{attachment.get('id')}/$value"
+        data = graph_get_resource(session, graph_config, url)
+        content, content_type = data.get("contentBytes"), data.get("contentType")
+        return content, content_type
+
+    def _get_item_content(name: Path) -> tuple[str | None, str | None]:
+        # Attachment is a contact, event or message.
+        _, item_data_type = _get_item_expanded_content()
+        content, content_type = _get_item_value()
+
+        if item_data_type == "#microsoft.graph.message":
+            if content_type != "text/plain":
+                _warn_attachment(name, f"Content type for '{item_data_type}' is '{content_type}', expected 'text/plain'")
+            content_type = "message/rfc822"  # guess_extension() -> '.eml'
+        else:
+            _warn_attachment(name, f"Unsupported item data type '{item_data_type}'")
+
+        return content, content_type
+
+    name = Path(_safe_title(attachment.get("name", ""), ATTACHMENT_DEFAULT_NAME))
+    data_suffix = name.suffix or None
+
+    # We require every attachment to have a suffix.
+    # Lowercase to keep consistent with guess_extension() result.
+    name = name.with_suffix(data_suffix.lower()) if data_suffix else Path(f"{name.stem}{ATTACHMENT_DEFAULT_SUFFIX}")
+
+    data_type: str | None = attachment.get("@odata.type")
+    content: str | None = attachment.get("contentBytes")
+    content_type: str | None = attachment.get("contentType")
+
+    if data_type == ATTACHMENT_DATATYPE_ITEM:
+        if content is not None:
+            _warn_attachment(name, f"@data.type '{data_type}' has unexpected 'contentBytes' value")
+        content, content_type = _get_item_content(name)
+    elif data_type == ATTACHMENT_DATATYPE_FILE:
+        if content is None:
+            _warn_attachment(name, f"@data.type '{data_type}' is missing 'contentBytes' value")
+    else:
+        _warn_attachment(name, f"@data.type '{data_type}' is not supported")
+
+    if content is None:
+        _warn_attachment(name, "No content", logging.ERROR)
+        return None, None
+
+    if not data_suffix and content_type:
+        guess_suffix = mimetypes.guess_extension(content_type, strict=False)
+
+        if guess_suffix:
+            name = name.with_suffix(guess_suffix)
+        else:
+            _warn_attachment(name, f"Content type '{content_type}' is not assigned a standard suffix")
+
+    attachment["name"] = f"{attachment_name_prefix} {name}"
+
+    return content, content_type
+
+
+def _save_attachment(  # noqa: PLR0913, PLR0917
+    session: sessions.Session,
+    graph_config: GraphApiConfig,
+    message: GraphMessageT,
+    attachment: GraphAttachmentT,
+    attachment_name_prefix: str,
+    note_date: datetime,
+    export_opts: ExportOptions,
+) -> Path | None:
+    """Save a message attachment to the local filesystem.
+
+    Args:
+        session (sessions.Session): The requests session to pool requests.
+        graph_config (GraphApiConfig): Graph API configuration.
+        message (GraphMessageT): Message properties.
+        attachment (GraphAttachmentT): Attachment properties.
+        attachment_name_prefix (str): Prefix to prepend to attachment filenames. Must be filename safe.
+        note_date (datetime): The date of the note.
+        export_opts (ExportOptions): Export options.
+
+    Returns:
+        Path | None: Path to saved attachment or None if save failed for a non-fatal reason.
+    """
+    content, content_type = _get_attachment_content(
+        session,
+        graph_config,
+        message,
+        attachment,
+        attachment_name_prefix,
+    )
+
+    if content is None:
+        return None
+
+    assert isinstance(export_opts.attachments_folder, Path)  # noqa: S101
+    assert export_opts.attachments_folder.is_absolute()  # noqa: S101
+
+    attachment_path = _unique_out_path(export_opts.attachments_folder / Path(attachment["name"]))
+
+    if export_opts.dry_run:
+        logger.debug("Wrote attachment to '%s' (%s) (dry run)", attachment_path.name, content_type)
+    elif content_type and content_type.startswith(("text/", "message/")):
+        attachment_path.write_text(content, encoding="utf-8")
+        logger.debug("Wrote attachment to '%s' (%s)", attachment_path.name, content_type)
+    else:
+        try:
+            with attachment_path.open("wb") as f:
+                f.write(base64.b64decode(content))
+            logger.debug("Wrote attachment to '%s' (%s)", attachment_path.name, content_type)
+        except binascii.Error as err:
+            _log_message_notice(message, f'attachment("{attachment_path.name}"): b64decode failed: {err}', logging.ERROR)
+            return None
+
+    if attachment_path.is_file():
+        os.utime(attachment_path, (note_date.timestamp(), note_date.timestamp()))
+
+    return attachment_path
+
+
+def _save_attachments(  # noqa: PLR0913, PLR0917
+    session: sessions.Session,
+    graph_config: GraphApiConfig,
+    message: GraphMessageT,
+    note_path: Path,
+    note_date: datetime,
+    export_opts: ExportOptions,
+) -> list[str]:
+    """Save message attachments to the local filesystem.
+
+    Args:
+        session (sessions.Session): The requests session to pool requests.
+        graph_config (GraphApiConfig): Graph API configuration.
+        message (GraphMessageT): Message properties.
+        note_path (Path): The path to the note file.
+        note_date (datetime): The date of the note.
+        export_opts (ExportOptions): Export options.
+
+    Returns:
+        list[str]: Paths relative to vault or URIs (file://) for absolute paths.
+    """
+
+    def _attachment_rel_links(abs_paths: list[Path], note_dir: Path, vault_dir: Path) -> list[str]:
+        """Convert absolute paths into paths relative to the note directory or the vault.
+
+        For links without a path, Obsidian seems to search:
+
+        1. Note folder
+        2. Note subfolders
+        3. Vault root
+        4. Vault subfolders, alphabetically
+
+        Outside the note directory and vault, use a file URI.
+        """
+        always_rel = False
+        rel_paths: list[str] = []
+
+        for abs_path in abs_paths:
+            assert abs_path.is_absolute()  # noqa: S101 ; as_uri fails otherwise
+            if always_rel:
+                try:
+                    rel_path = str(abs_path.relative_to(vault_dir, walk_up=True))
+                except ValueError:
+                    rel_path = abs_path.as_uri()
+            elif abs_path.is_relative_to(note_dir) or abs_path.is_relative_to(vault_dir):
+                rel_path = abs_path.name
+            else:
+                rel_path = abs_path.as_uri()
+
+            rel_paths.append(rel_path)
+
+        return rel_paths
+
+    attachment_paths: list[Path] = []
+
+    for attachment in _list_attachments(session, graph_config, message):
+        attachment_path = _save_attachment(
+            session,
+            graph_config,
+            message,
+            attachment,
+            note_path.stem,
+            note_date,
+            export_opts,
+        )
+
+        if attachment_path:
+            attachment_paths.append(attachment_path)
+
+    return _attachment_rel_links(attachment_paths, note_path.parent, export_opts.vault_dir)
+
+
+def _export_message(  # noqa: C901, PLR0912, PLR0915
+    session: sessions.Session,
+    graph_config: GraphApiConfig,
+    message: GraphMessageT,
     export_opts: ExportOptions,
     export_stats: ExportStatsT,
 ) -> None:
     """Export a message.
 
     Args:
-        message (MessageT): The message.
-        vault_dir (Path): The directory to export the message to.
+        session (sessions.Session): The requests session to pool requests.
+        graph_config (GraphApiConfig): Graph API configuration.
+        message (GraphMessageT): The message.
         export_opts (ExportOptions): Export options.
         export_stats (ExportStatsDict): Export statistics dictionary to update.
     """
@@ -662,15 +965,23 @@ def _export_message(  # noqa: C901, PLR0912, PLR0915
             message["receivedDateTime"],
         )
 
-    subject: str = message.get("subject", TITLE_UNTITLED)
-    title = _safe_title(subject)
+    def _rel_path_link(rel_path_or_uri: str, *, inline: bool) -> str:
+        if rel_path_or_uri.startswith("file://"):
+            # Links external to the vault are normal markdown links
+            abs_path = Path(rel_path_or_uri[7:])
+            return f"[{unquote(abs_path.name)}]({rel_path_or_uri})"
+
+        return f"![[{rel_path_or_uri}]]" if inline else f"[[{rel_path_or_uri}]]"
+
+    subject: str = message.get("subject") or TITLE_UNTITLED
+    title = _safe_title(subject, TITLE_UNTITLED)
     is_draft: bool | None = message.get("isDraft")
     body_content: str | None = message.get("body", {}).get("content")
     content_type: str | None = message.get("body", {}).get("contentType")
     has_attachments: bool | None = message.get("hasAttachments")
-    message_out_path = _unique_out_path(vault_dir / Path(title + ".md"))
+    note_path = _unique_out_path(export_opts.notes_dir / Path(title + ".md"))
     dt_now = datetime_now()
-    note_content = body_content
+    note_body = body_content
 
     _fix_dates(message, bool(is_draft))
 
@@ -680,24 +991,32 @@ def _export_message(  # noqa: C901, PLR0912, PLR0915
 
     if body_content:
         if content_type == "html":
-            note_content = _convert_to_markdown(body_content)
+            note_body = _convert_to_markdown(body_content)
         elif content_type != "text":
             _log_message_notice(message, f"field('contentType'): unexpected type: '{content_type}'")
 
-    if not note_content:
+    if not note_body:
+        skip_reason, level = None, logging.INFO
+
         if body_content is None:
-            stat, level = ExportStat.STAT_SKIPPED_NO_MESSAGE_BODY, logging.WARNING
-        elif note_content is None:
-            stat, level = ExportStat.STAT_SKIPPED_MARKDOWN_CONVERSION_FAILED, logging.WARNING
-        elif has_attachments:
-            stat, level = ExportStat.STAT_SKIPPED_NO_MESSAGE_CONTENT_JUST_ATTACHMENTS, logging.INFO
+            skip_reason, level = ExportStat.STAT_SKIPPED_NO_MESSAGE_BODY, logging.WARNING
+        elif note_body is None:
+            skip_reason, level = ExportStat.STAT_SKIPPED_MARKDOWN_CONVERSION_FAILED, logging.WARNING
+        elif has_attachments and export_opts.with_attachments:
+            pass  # export attachments
+        elif not has_attachments:
+            skip_reason, level = ExportStat.STAT_SKIPPED_NO_MESSAGE_CONTENT_NO_ATTACHMENTS, logging.INFO
+        elif not export_opts.with_attachments:
+            skip_reason, level = ExportStat.STAT_SKIPPED_NO_MESSAGE_CONTENT_JUST_ATTACHMENTS, logging.INFO
         else:
-            stat, level = ExportStat.STAT_SKIPPED_NO_MESSAGE_CONTENT_NO_ATTACHMENTS, logging.INFO
+            skip_reason, level = ExportStat.STAT_SKIPPED_NO_MESSAGE_CONTENT_UNKNOWN, logging.ERROR
 
-        _exportstat_incr(export_stats, stat)
-        _log_message_notice(message, stat.value, level)
+        if skip_reason:
+            _exportstat_incr(export_stats, skip_reason)
+            _log_message_notice(message, skip_reason.value, level)
+            return  # don't write empty notes
 
-        return  # don't write empty notes
+        note_body = ""  # content will be links to attachments
 
     tag_vars = {}
 
@@ -723,20 +1042,52 @@ def _export_message(  # noqa: C901, PLR0912, PLR0915
         "{message.subject}": subject,
     }
 
+    note_content: list[str] = []
+    attachment_links: list[str] = []
+
+    # Save attachments and get links to them
+    if has_attachments and export_opts.with_attachments:
+        attachment_paths = _save_attachments(
+            session,
+            graph_config,
+            message,
+            note_path,
+            note_date,
+            export_opts,
+        )
+
+        inline = len(attachment_paths) == 1 and not note_body  # Note consists of a single inline link
+        attachment_links = [_rel_path_link(rel_path_or_uri, inline=inline) for rel_path_or_uri in attachment_paths]
+
+        _exportstat_incr(export_stats, ExportStat.STAT_ATTACHMENT_LINKED, len(attachment_paths))
+
     frontmatter = _init_note_frontmatter(export_opts.note_metaprop, metaprop_vars)
 
-    note_content = _append_note_tags(note_content, export_opts, tag_vars, frontmatter)
+    note_body = _append_note_tags(note_body, export_opts, tag_vars, frontmatter)
 
     if frontmatter:
-        frontmatter_yaml = yaml.safe_dump(frontmatter, sort_keys=False).strip()
-        note_content = f"---\n{frontmatter_yaml}\n---\n{note_content}"
+        # Frontmatter goes first
+        note_content = [
+            "---",
+            yaml.safe_dump(frontmatter, sort_keys=False).strip(),
+            "---",
+            *note_content,
+        ]
+
+    if attachment_links:
+        note_content.extend(attachment_links)
+        note_content.append("")  # blank line
+
+    # Note body goes last
+    note_content.append(note_body)
 
     if not export_opts.dry_run:
-        message_out_path.write_text(note_content, encoding="utf-8")
-        os.utime(message_out_path, (note_date.timestamp(), note_date.timestamp()))
-        logger.debug("Wrote note to '%s'", message_out_path.name)
+        note_text = "\n".join(note_content).strip() + "\n"
+        note_path.write_text(note_text, encoding="utf-8")
+        os.utime(note_path, (note_date.timestamp(), note_date.timestamp()))
+        logger.debug("Wrote note to '%s'", note_path.name)
     else:
-        logger.debug("Wrote note to '%s' (dry run)", message_out_path.name)
+        logger.debug("Wrote note to '%s' (dry run)", note_path.name)
 
     _exportstat_incr(export_stats, ExportStat.STAT_NOTE_CREATED)
 
@@ -751,7 +1102,6 @@ def _export_folder_batch(  # noqa: PLR0913, PLR0917
     params: dict[str, Any] | None,
     batch_limit: int,
     exported_ids: set[str],
-    vault_dir: Path,
     export_opts: ExportOptions,
     export_stats: ExportStatsT,
 ) -> tuple[set[str], int, str | None]:
@@ -767,7 +1117,6 @@ def _export_folder_batch(  # noqa: PLR0913, PLR0917
         params (dict[str, Any] | None): The query parameters for the API request.
         batch_limit (int): The maximum number of messages to export in this batch.
         exported_ids (set[str]): The set of message IDs that have already been exported.
-        vault_dir (Path): The directory to export the messages to.
         export_opts (ExportOptions): Options for exporting messages.
         export_stats (ExportStats): Export statistics dictionary to update.
 
@@ -786,7 +1135,13 @@ def _export_folder_batch(  # noqa: PLR0913, PLR0917
 
     for message in messages:
         if message["id"] not in exported_ids:
-            _export_message(message, vault_dir, export_opts, export_stats)
+            _export_message(
+                session,
+                graph_config,
+                message,
+                export_opts,
+                export_stats,
+            )
             batch_ids.add(message["id"])
         else:
             _exportstat_incr(export_stats, ExportStat.STAT_SKIPPED_DUPLICATE)
@@ -825,7 +1180,22 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
 
     Raises:
         requests.RequestException derived error.
+        OSError derived error.
     """
+
+    def _mkdir(dir_path: Path, name: str, *, parents: bool = False, exist_ok: bool = True) -> None:
+        if not dir_path.is_dir():
+            if not export_opts.dry_run:
+                try:
+                    dir_path.mkdir(parents=parents, exist_ok=exist_ok)
+                except OSError as err:
+                    err_console.print(f"Failed to create {name} directory: {err}")
+                    raise typer.Exit(code=1) from err
+
+                logger.info("Created %s directory '%s'", name, dir_path)
+            else:
+                logger.info("Created %s directory '%s' (dry run)", name, dir_path)
+
     manifest_ids = set()
     manifest_file_name = Path("export_manifest_" + hashlib.sha256(folder["id"].encode("utf-8")).hexdigest() + ".json")
     manifest_file_path = (manifest_dir / manifest_file_name) if manifest_dir else None
@@ -837,16 +1207,39 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
 
     exported_total_count = len(manifest_ids)
     folder_message_count = folder["totalItemCount"]
-    vault_dir = export_opts.vault_dir
+    notes_dir = export_opts.notes_dir
+    attachments_dir_path = Path(export_opts.attachments_folder)  # assume it's an absolute path to start
+    attachments_mkdir = export_opts.attachments_mkdir
 
-    if export_opts.folder_mkdir:
-        vault_dir = vault_dir / Path(folder["folderPath"])
-        vault_dir.mkdir(parents=True, exist_ok=True)
+    if export_opts.notes_mkdir:
+        notes_dir = notes_dir / Path(folder["folderPath"])
+
+    if isinstance(export_opts.attachments_folder, Path):
+        assert attachments_dir_path.is_dir()  # noqa: S101 ; caller should have verified!
+        assert attachments_dir_path.is_absolute()  # noqa: S101 ; caller should have verified!
+    elif export_opts.attachments_folder.upper() == ATTACHMENTS_FOLDER_VAULT:
+        attachments_dir_path = export_opts.vault_dir
+        attachments_mkdir = False
+    elif export_opts.attachments_folder.upper().startswith(ATTACHMENTS_FOLDER_NOTE):  # allow plural "NOTES"
+        attachments_dir_path = notes_dir
+        attachments_mkdir = False
+    elif not attachments_dir_path.is_absolute():
+        attachments_dir_path = notes_dir / _safe_title(export_opts.attachments_folder, ATTACHMENTS_DEFAULT_FOLDER)
+        attachments_mkdir = False
+
+    if attachments_mkdir:
+        attachments_dir_path = attachments_dir_path / Path(folder["folderPath"])
 
     if not export_opts.filter_test:
         console.print()
         console.print(f"[bold]Exporting folder '{folder['folderPath']}':")
-        console.print(f"Exporting to '{vault_dir}'")
+        console.print(f"Saving notes to '{notes_dir}'")
+
+        _mkdir(notes_dir, "notes", parents=export_opts.notes_mkdir)
+
+        if export_opts.with_attachments:
+            console.print(f"Saving attachments to '{attachments_dir_path}'")
+            _mkdir(attachments_dir_path, "attachments", parents=attachments_mkdir)
 
     # Dynamic variables that can be referenced in tags and metadata properties.
     folder_tag_vars = {
@@ -854,9 +1247,11 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         "{folder.folderPath}": folder["folderPath"],
     }
 
-    # Expand tags into a copy of export_opts (so caller's copy is not modified)
+    # Tweak export options without modifying caller
     export_opts = copy.replace(
         export_opts,
+        notes_dir=notes_dir,
+        attachments_folder=attachments_dir_path,
         note_tags=_expand_folder_tags(folder, export_opts.note_tags, folder_tag_vars),
         note_body_tags=_expand_folder_tags(folder, export_opts.note_body_tags, folder_tag_vars),
         note_metaprop=_expand_folder_metaprop(folder, export_opts.note_metaprop, folder_tag_vars),
@@ -866,6 +1261,9 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         # Start with stats that will always be output
         ExportStat.STAT_NOTE_CREATED: 0,
     }
+
+    if export_opts.with_attachments:
+        export_stats[ExportStat.STAT_ATTACHMENT_LINKED] = 0
 
     # https://learn.microsoft.com/en-us/graph/query-parameters
     params = {
@@ -985,7 +1383,6 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
                 params,
                 min(batch_size, export_limit - exported_total_count),
                 manifest_ids,
-                vault_dir,
                 export_opts,
                 export_stats,
             )
@@ -1084,13 +1481,13 @@ def _build_filter_query(
 
 
 @app.command()
-def export(  # noqa: PLR0913, PLR0917
+def export(  # noqa: C901, PLR0913, PLR0915, PLR0917
     ctx: typer.Context,
     folder_name: Annotated[
         list[str],
         typer.Argument(
             hidden=True,
-            metavar="FOLDER...",
+            metavar="FOLDER ...",
         ),
     ],
     vault_dir: Annotated[
@@ -1178,6 +1575,38 @@ def export(  # noqa: PLR0913, PLR0917
             help="Place body tags at the end of the note instead of the top.",
         ),
     ] = False,
+    notes_mkdir: Annotated[  # noqa: FBT002
+        bool,
+        typer.Option(
+            help="Create mail folder hierarchy in notes directory.",
+        ),
+    ] = False,
+    with_attachments: Annotated[  # noqa: FBT002
+        bool,
+        typer.Option(
+            "--attachments/--no-attachments",
+            help="Download and link attachments to note.",
+        ),
+    ] = True,
+    attachments_folder: Annotated[
+        str,
+        typer.Option(
+            hidden=False,
+            exists=False,
+            dir_okay=True,
+            file_okay=False,
+            writable=True,
+            metavar=f"'{ATTACHMENTS_FOLDER_VAULT}'|'{ATTACHMENTS_FOLDER_NOTE}'|NAME|DIRECTORY",
+            help="Store attachments in the vault, same folder as notes, a subfolder of notes, or another directory.",
+            callback=_opt_attachments_folder_callback,
+        ),
+    ] = ATTACHMENTS_DEFAULT_FOLDER,
+    attachments_mkdir: Annotated[  # noqa: FBT002
+        bool,
+        typer.Option(
+            help="Create mail folder hierarchy in attachments directory when outside the vault.",
+        ),
+    ] = False,
     use_manifest: Annotated[  # noqa: FBT002
         bool,
         typer.Option(
@@ -1200,12 +1629,6 @@ def export(  # noqa: PLR0913, PLR0917
             help="Number of messages to to fetch in each Graph API request.",
         ),
     ] = GRAPH_API_BATCH_MAX,
-    mkdir: Annotated[  # noqa: FBT002
-        bool,
-        typer.Option(
-            help="Export to a directory with folder name.",
-        ),
-    ] = False,
     dry_run: Annotated[  # noqa: FBT002
         bool,
         typer.Option(
@@ -1241,22 +1664,28 @@ def export(  # noqa: PLR0913, PLR0917
         filter_test=filter_test,
     )
 
+    vault_dir = vault_dir.absolute()
+
     try:
         graph_config = get_graph_config(common_opts)
 
         export_opts = ExportOptions(
+            attachments_folder=attachments_folder,
+            attachments_mkdir=attachments_mkdir,
             dry_run=dry_run,
             filter_query=filter_query,
             filter_test=filter_test,
-            folder_mkdir=mkdir,
+            notes_mkdir=notes_mkdir,
             graph_config=graph_config,
             note_body_tags=note_body_tags or None,
             note_metaprop=note_metaprop or None,
             note_tags=note_tags or None,
+            notes_dir=vault_dir,
             place_tags_body_end=place_tags_body_end,
             place_tags_frontmatter=place_tags_frontmatter,
             search_query=search_query,
             vault_dir=vault_dir,
+            with_attachments=with_attachments,
         )
 
         folders: dict[str, GraphFolderT] = {}
@@ -1307,5 +1736,8 @@ def export(  # noqa: PLR0913, PLR0917
         err_console.print(f"{err} {AUTH_ERROR_USECOMMAND}")
         raise typer.Exit(code=1) from err
     except ValueError as err:
+        err_console.print(f"Error: {err}")
+        raise typer.Exit(code=1) from err
+    except OSError as err:
         err_console.print(f"Error: {err}")
         raise typer.Exit(code=1) from err

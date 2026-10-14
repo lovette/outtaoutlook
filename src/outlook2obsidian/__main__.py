@@ -5,7 +5,6 @@ import copy
 import importlib.metadata
 import json
 import logging
-import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
 
@@ -13,7 +12,7 @@ import typer
 import yaml
 
 from .commands import auth_app, export_app, ls_app
-from .shared import APP_NAME, VERBOSE_LOGGING_LEVEL_ERROR, CommandContext, console
+from .shared import APP_NAME, VERBOSE_LOGGING_LEVEL_ERROR, CommandContext, console, path_with_vars
 
 if TYPE_CHECKING:
     from io import TextIOWrapper
@@ -171,7 +170,7 @@ def _opt_config_file_callback(  # noqa: C901, PLR0915
         for opt in ("auth_file", "cache_dir"):
             opt_value = default_map.get(opt)
             if opt_value:
-                default_map[opt] = Path(os.path.expandvars(opt_value)).expanduser().resolve()
+                default_map[opt] = path_with_vars(opt_value)
 
     def _validate_auth_opts(default_map: dict[str, Any]) -> None:
         auth_cmd_config = default_map.get("auth")

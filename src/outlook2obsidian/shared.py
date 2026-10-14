@@ -3,6 +3,7 @@
 import hashlib
 import json
 import logging
+import os
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -125,12 +126,28 @@ GRAPH_MESSAGE_FIELDS = [
     "webLink",  # "URL"
 ]
 
+GRAPH_ATTACHMENT_FIELDS = [
+    "@odata.mediaContentType",  # str; e.g. 'image/jpeg'
+    "@odata.type",  # #microsoft.graph.[itemAttachment|fileAttachment]
+    "contentBytes",  # str; if isInline is True
+    "contentId",  # str
+    "contentLocation",  # str|None
+    "contentType",  # str|None; e.g. 'image/jpeg'
+    "id",  # UUID
+    "isInline",  # bool
+    "lastModifiedDateTime",  # isodate; unreliable, how does a message dated 2009 have a modified date of 2025?!
+    "name",  # str
+    "size",  # int
+]
+
 GRAPH_ACCESS_TOKEN_FIELDS_SET = set(GRAPH_ACCESS_TOKEN_FIELDS)
 GRAPH_CACHED_TOKEN_FIELDS_SET = set(GRAPH_CACHED_TOKEN_FIELDS)
 GRAPH_ACCOUNT_FIELDS_SET = set(GRAPH_ACCOUNT_FIELDS)
 GRAPH_FOLDER_FIELDS_SET = set(GRAPH_FOLDER_FIELDS)
 GRAPH_MESSAGE_FIELDS_SET = set(GRAPH_MESSAGE_FIELDS)
 GRAPH_APPMETADATA_FIELDS_SET = set(GRAPH_APPMETADATA_FIELDS)
+GRAPH_ATTACHMENT_FIELDS_SET = set(GRAPH_ATTACHMENT_FIELDS)
+
 
 ######################################################################
 # Types and classes
@@ -143,7 +160,7 @@ GraphAccountT = dict[str, Any]  # GRAPH_ACCOUNT_FIELDS
 GraphFolderT = dict[str, Any]  # GRAPH_FOLDER_FIELDS
 GraphMessageT = dict[str, Any]  # GRAPH_MESSAGE_FIELDS
 GraphAppMetadataT = dict[str, Any]  # GRAPH_APPMETADATA_FIELDS
-
+GraphAttachmentT = dict[str, Any]  # GRAPH_ATTACHMENT_FIELDS_SET
 NoteMetaPropT = dict[str, str | int | Sequence[str | int]]
 
 
@@ -708,3 +725,20 @@ def graph_get_folder_by_path(
         folder = graph_get_folder_by_path(session, graph_config, Path(*path_parts), folder)
 
     return folder
+
+
+def path_with_vars(p: str | Path, *, absolute: bool = True, resolve: bool = False) -> Path:
+    """Expand user home directory reference (~) and shell variables ($ENV) in a path.
+
+    Args:
+        p (str | Path): A path.
+        absolute (bool, optional): Whether to return an absolute path. Defaults to True.
+        resolve (bool, optional): Whether to resolve symlinks and remove '..' segments. Defaults to False.
+
+    Returns:
+        Path: The expanded path, optionally absolute and resolved based on the parameters.
+    """
+    path = Path(os.path.expandvars(str(p))).expanduser()
+    if resolve:
+        path = path.resolve()
+    return path.absolute() if absolute else path

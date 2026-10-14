@@ -56,8 +56,11 @@ export:
   use_manifest: true
   limit: 0
   batch_size: 100
-  mkdir: false
+  notes_mkdir: false
   dry_run: false
+  with_attachments: true
+  attachments_folder: "assets"
+  attachments_mkdir: true
 
   filter:
     - "lastModifiedDateTime ge 2026-01-01"
