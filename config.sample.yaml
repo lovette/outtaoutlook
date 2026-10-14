@@ -61,6 +61,7 @@ export:
   with_attachments: true
   attachments_folder: "assets"
   attachments_mkdir: true
+  maxdepth: 5
 
   filter:
     - "lastModifiedDateTime ge 2026-01-01"

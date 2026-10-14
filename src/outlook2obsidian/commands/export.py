@@ -43,6 +43,7 @@ from outlook2obsidian.shared import (
     GraphApiConfig,
     GraphApiReturnT,
     GraphAttachmentT,
+    GraphFolderNotFoundError,
     GraphFolderT,
     GraphMessageT,
     NoteMetaPropT,
@@ -50,9 +51,10 @@ from outlook2obsidian.shared import (
     datetime_now,
     err_console,
     get_graph_config,
-    graph_get_folder_by_path,
     graph_get_resource,
+    graph_resolve_folder_paths,
     path_with_vars,
+    print_graph_request_exception,
 )
 
 if TYPE_CHECKING:
@@ -68,6 +70,7 @@ logger = logging.getLogger(APP_NAME)  # initialized in __main__
 TITLE_UNTITLED = "Untitled"
 TITLE_MAXLEN = 255 - 5  # macOS limit minus a few characters for `_unique_out_path`
 MIN_PROGRESS_THRESHOLD = 10  # Hide progress if only a few messages
+EXPORT_FOLDER_MSGFOLDERROOT = "msgfolderroot"
 
 ATTACHMENT_DEFAULT_SUFFIX = ".bin"
 ATTACHMENT_DEFAULT_NAME = "unnamed"  # suffix will be guessed
@@ -1196,6 +1199,16 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
             else:
                 logger.info("Created %s directory '%s' (dry run)", name, dir_path)
 
+    folder_message_count = folder["totalItemCount"]
+
+    if not export_opts.filter_test:
+        console.print()
+        console.print(f"[bold]Exporting folder '{folder['folderPath']}':")
+
+    if not folder_message_count:
+        console.print("Folder is empty")
+        return
+
     manifest_ids = set()
     manifest_file_name = Path("export_manifest_" + hashlib.sha256(folder["id"].encode("utf-8")).hexdigest() + ".json")
     manifest_file_path = (manifest_dir / manifest_file_name) if manifest_dir else None
@@ -1206,7 +1219,6 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         manifest_ids = set(manifest_data.get("message_ids", []))
 
     exported_total_count = len(manifest_ids)
-    folder_message_count = folder["totalItemCount"]
     notes_dir = export_opts.notes_dir
     attachments_dir_path = Path(export_opts.attachments_folder)  # assume it's an absolute path to start
     attachments_mkdir = export_opts.attachments_mkdir
@@ -1231,10 +1243,7 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         attachments_dir_path = attachments_dir_path / Path(folder["folderPath"])
 
     if not export_opts.filter_test:
-        console.print()
-        console.print(f"[bold]Exporting folder '{folder['folderPath']}':")
         console.print(f"Saving notes to '{notes_dir}'")
-
         _mkdir(notes_dir, "notes", parents=export_opts.notes_mkdir)
 
         if export_opts.with_attachments:
@@ -1328,9 +1337,7 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         return
 
     if not export_message_count:
-        if not folder_message_count:
-            msg = "Folder is empty"
-        elif export_opts.filter_query:
+        if export_opts.filter_query:
             msg = "Folder contains no messages matching 'filter' criteria"
         elif export_opts.search_query:
             msg = "Folder contains no messages matching 'search' criteria"
@@ -1481,13 +1488,13 @@ def _build_filter_query(
 
 
 @app.command()
-def export(  # noqa: C901, PLR0913, PLR0915, PLR0917
+def export(  # noqa: PLR0913, PLR0917
     ctx: typer.Context,
     folder_name: Annotated[
         list[str],
         typer.Argument(
             hidden=True,
-            metavar="FOLDER ...",
+            metavar=f"'{EXPORT_FOLDER_MSGFOLDERROOT}'|FOLDER ...",
         ),
     ],
     vault_dir: Annotated[
@@ -1607,6 +1614,14 @@ def export(  # noqa: C901, PLR0913, PLR0915, PLR0917
             help="Create mail folder hierarchy in attachments directory when outside the vault.",
         ),
     ] = False,
+    maxdepth: Annotated[
+        int,
+        typer.Option(
+            "--maxdepth",
+            min=1,
+            help="Maximum depth of folder tree to export.",
+        ),
+    ] = 1,
     use_manifest: Annotated[  # noqa: FBT002
         bool,
         typer.Option(
@@ -1688,25 +1703,23 @@ def export(  # noqa: C901, PLR0913, PLR0915, PLR0917
             with_attachments=with_attachments,
         )
 
-        folders: dict[str, GraphFolderT] = {}
+        # Are we exporting the entire mailbox?
+        folder_is_msgfolderroot = EXPORT_FOLDER_MSGFOLDERROOT in {f.lower() for f in folder_name}
 
-        # Fail early if any folder does not exist
         with sessions.Session() as session:
-            for folder_path in folder_name:
-                folder = graph_get_folder_by_path(session, graph_config, Path(folder_path), MAILBOX_ROOT)
-                if not folder:
-                    err_console.print(f"Error: '{folder_path}': No such mail folder.")
-                    raise typer.Exit(code=1)
-
-                folders[folder_path] = folder
-
-        logger.info("Querying Graph API for %d messages at a time", batch_size)
+            folders = graph_resolve_folder_paths(
+                session,
+                graph_config,
+                MAILBOX_ROOT if folder_is_msgfolderroot else folder_name,
+                maxdepth=maxdepth,
+            )
 
         if not filter_test:
+            logger.debug("Querying Graph API for %d messages at a time", batch_size)
             console.print(f"Exporting messages from {len(folders)} folders...")
 
         with sessions.Session() as session:
-            for folder in folders.values():
+            for folder in folders:
                 _export_folder(
                     session,
                     graph_config,
@@ -1718,26 +1731,11 @@ def export(  # noqa: C901, PLR0913, PLR0915, PLR0917
                 )
 
     except requests.RequestException as err:
-        resp_error_code, resp_error_message = None, None
-
-        if err.response is not None:
-            # See if Graph API returned an error message in the response body
-            resp_json = err.response.json()
-            resp_error = resp_json.get("error", {})
-            resp_error_code, resp_error_message = resp_error.get("code"), resp_error.get("message")
-
-        if resp_error_code and resp_error_message:
-            err_console.print(f"Error: {resp_error_message} [{resp_error_code}]; {err}")
-        else:
-            err_console.print(f"Error: {err}")
-
+        print_graph_request_exception(err)
         raise typer.Exit(code=1) from err
     except AuthRequiredError as err:
         err_console.print(f"{err} {AUTH_ERROR_USECOMMAND}")
         raise typer.Exit(code=1) from err
-    except ValueError as err:
-        err_console.print(f"Error: {err}")
-        raise typer.Exit(code=1) from err
-    except OSError as err:
+    except (GraphFolderNotFoundError, ValueError, OSError) as err:
         err_console.print(f"Error: {err}")
         raise typer.Exit(code=1) from err
