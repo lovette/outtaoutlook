@@ -423,7 +423,7 @@ def get_graph_client(  # noqa: C901, PLR0912
     return app, cache, account, token
 
 
-def graph_get_resource(
+def graph_get_resource(  # noqa: C901
     session: sessions.Session,
     graph_config: GraphApiConfig,
     url: str,
@@ -481,12 +481,36 @@ def graph_get_resource(
                 logger.debug(
                     'Using cached Graph API response for "GET %s" - %d',
                     req_url,
-                    response.get("content-length"),
+                    response.get("contentLength"),
                 )
 
-                return response["content-json"]
+                return response["content"]
 
         return None
+
+    def _get_content_as_json(resp: requests.Response) -> dict[str, Any]:
+        # e.g. "application/json; odata.metadata=minimal; odata.streaming=true; IEEE754Compatible=false; charset=utf-8"
+        content_type = resp.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+
+        if content_type == "application/json":
+            return resp.json()
+
+        # Most Graph API responses are JSON but some endpoints such as '/attachments/id/$value'
+        # return plain text or other content types.
+        # Property names are consistent with those returned by '/attachments/id/$value'.
+
+        if content_type == "text/plain":
+            return {
+                "contentType": content_type,
+                "contentBytes": resp.text,
+                "size": len(resp.text),
+            }
+
+        return {
+            "contentType": content_type,
+            "contentBytes": resp.content,
+            "size": len(resp.content),
+        }
 
     headers = {
         "Authorization": f"Bearer {graph_config.access_token}",
@@ -507,7 +531,7 @@ def graph_get_resource(
 
     resp.raise_for_status()
 
-    resp_json = resp.json()
+    resp_json = _get_content_as_json(resp)
 
     if cache_file_path:
         cache_file_path.write_text(
@@ -515,9 +539,10 @@ def graph_get_resource(
                 cache_json_header
                 | {
                     "response": {
-                        "content-date": datetime.now(tz=timezone.utc).isoformat(),  # noqa: UP017
-                        "content-json": resp_json,
-                        "content-length": len(resp.text),
+                        "date": datetime_now().isoformat(),
+                        "contentType": "application/json",
+                        "contentLength": resp_json.get("size") or len(resp.text),
+                        "content": resp_json,
                     },
                 },
             ),
