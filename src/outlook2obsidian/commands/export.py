@@ -1402,7 +1402,7 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         elif export_opts.search_query:
             msg = "Folder contains no messages matching 'search' criteria"
         else:
-            msg = "Folder contains {folder_message_count} messages but Graph API result was empty"
+            msg = f"Folder contains {folder_message_count} messages but Graph API result was empty"
 
         console.print(msg)
         return
