@@ -172,7 +172,6 @@ class ExportOptions:
     filter_query: str | None  # --filter criteria from command line and config file.
     filter_test: bool  # Whether to perform a filter test without exporting.
     notes_mkdir: bool  # Create mail folder hierarchy in notes directory.
-    graph_config: GraphApiConfig  # Graph API configuration.
     note_body_tags: list[str] | None  # --body-tag tags from command line and config file.
     note_metaprop: NoteMetaPropT | None  # --metaprop properties from command line and config file.
     note_tags: list[str] | None  # --tag tags from command line and config file.
@@ -1752,7 +1751,6 @@ def export(  # noqa: PLR0913, PLR0917
             filter_query=filter_query,
             filter_test=filter_test,
             notes_mkdir=notes_mkdir,
-            graph_config=graph_config,
             note_body_tags=note_body_tags or None,
             note_metaprop=note_metaprop or None,
             note_tags=note_tags or None,
