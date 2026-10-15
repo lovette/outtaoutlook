@@ -791,6 +791,10 @@ def _get_attachment_content(  # noqa: C901
             if content_type != "text/plain":
                 _warn_attachment(name, f"Content type for '{item_data_type}' is '{content_type}', expected 'text/plain'")
             content_type = "message/rfc822"  # guess_extension() -> '.eml'
+        elif item_data_type == "#microsoft.graph.contact":
+            if not content_type or not content_type.endswith("vcard"):
+                _warn_attachment(name, f"Content type for '{item_data_type}' is '{content_type}', expected 'text/vcard'")
+            content_type = "text/x-vcard"  # guess_extension() -> '.vcf'
         else:
             _warn_attachment(name, f"Unsupported item data type '{item_data_type}'")
 
