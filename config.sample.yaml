@@ -91,3 +91,6 @@ export:
   body_tag:
     - "Tag A"
     - "Tag B"
+
+  not_folder:
+    - "Deleted Items"

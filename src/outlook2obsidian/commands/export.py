@@ -1630,6 +1630,15 @@ def export(  # noqa: PLR0913, PLR0917
             help="How to join multiple search conditions (and/or).",
         ),
     ] = FilterJoinCond.cond_and,
+    not_folder: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--not-folder",
+            "-n",
+            help="Exclude folder from export; option can be used more than once.",
+            metavar="FOLDER",
+        ),
+    ] = None,
     place_tags_frontmatter: Annotated[  # noqa: FBT002
         bool,
         typer.Option(
@@ -1726,10 +1735,13 @@ def export(  # noqa: PLR0913, PLR0917
     config_file_metaprop: dict[str, Any] = config_file_export_opts.get("metaprop", {})
     config_file_filters: list[str] = config_file_export_opts.get("filter", [])
     config_file_search: list[str] = config_file_export_opts.get("search", [])
+    config_file_not_folder: list[str] = config_file_export_opts.get("not_folder", [])
 
     note_tags = config_file_tags + (tag or [])
     note_body_tags = config_file_body_tags + (body_tag or [])
     note_metaprop = _merge_metaprops(config_file_metaprop, ctx_obj.export_metaprops)
+    not_folder = config_file_not_folder + (not_folder or [])
+    not_folder_set = {nf.lower() for nf in not_folder}
 
     filter_query, search_query = _build_filter_query(
         config_file_filters + (message_filter or []),
@@ -1772,6 +1784,9 @@ def export(  # noqa: PLR0913, PLR0917
                 MAILBOX_ROOT if folder_is_msgfolderroot else folder_name,
                 maxdepth=maxdepth,
             )
+
+        # Remove excluded folders
+        folders = [f for f in folders if f["displayName"].lower() not in not_folder_set]
 
         if not filter_test:
             logger.debug("Querying Graph API for %d messages at a time", batch_size)
