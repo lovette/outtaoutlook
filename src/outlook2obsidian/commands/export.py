@@ -156,9 +156,9 @@ class ExportStat(StrEnum):
     STAT_SKIPPED_DUPLICATE = "Skipped; Message already exported"
     STAT_SKIPPED_MARKDOWN_CONVERSION_FAILED = "Skipped; Markdown conversion failed"
     STAT_SKIPPED_NO_MESSAGE_BODY = "Skipped; No message body"
-    STAT_SKIPPED_NO_MESSAGE_CONTENT_JUST_ATTACHMENTS = "Skipped; No message content, just attachments"
-    STAT_SKIPPED_NO_MESSAGE_CONTENT_NO_ATTACHMENTS = "Skipped; No message content, no attachments"
-    STAT_SKIPPED_NO_MESSAGE_CONTENT_UNKNOWN = "Skipped; No message content, unknown reason"
+    STAT_SKIPPED_NO_MESSAGE_CONTENT_JUST_ATTACHMENTS = "Skipped; No note content, just attachments (not being saved)"
+    STAT_SKIPPED_NO_MESSAGE_CONTENT_NO_ATTACHMENTS = "Skipped; No note content"
+    STAT_SKIPPED_NO_MESSAGE_CONTENT_UNKNOWN = "Skipped; No note content, unknown reason"
     STAT_SKIPPED_EVENT_MESSAGE = "Skipped; Calendar event"
 
 
