@@ -165,7 +165,15 @@ GraphAttachmentT = dict[str, Any]  # GRAPH_ATTACHMENT_FIELDS_SET
 NoteMetaPropT = dict[str, str | int | Sequence[str | int]]
 
 
-class GraphFolderNotFoundError(Exception):
+class GraphApiError(Exception):
+    """Base class for Graph API related errors."""
+
+
+class GraphEmptyRootFolderError(GraphApiError):
+    """Raised if the Graph API returns no properties for the root information store."""
+
+
+class GraphFolderNotFoundError(GraphApiError):
     """Raised when a folder path cannot be found in the Graph API."""
 
 
@@ -594,14 +602,14 @@ def graph_get_mailbox_root(
 
     Raises:
         requests.RequestException derived error.
-        GraphFolderNotFoundError: Root information store cannot be retrieved.
+        GraphEmptyRootFolderError: Root information store cannot be retrieved.
     """
     url = f"{GRAPH_API_URL}/me/mailFolders/msgfolderroot"
 
     folder = graph_get_resource(session, graph_config, url)
     if not folder:
         errmsg = "Failed to get the root information store of the mailbox."
-        raise GraphFolderNotFoundError(errmsg)
+        raise GraphEmptyRootFolderError(errmsg)
 
     return folder
 
@@ -623,7 +631,7 @@ def graph_enum_folders(
 
     Raises:
         requests.RequestException derived error.
-        GraphFolderNotFoundError: If the root information store of the mailbox cannot be retrieved.
+        GraphEmptyRootFolderError: If the root information store of the mailbox cannot be retrieved.
     """
     folders: dict[str, GraphFolderT] = {}
 
@@ -696,7 +704,7 @@ def graph_get_folder_by_path(
     graph_config: GraphApiConfig,
     folder_path: str | Path,
     parent_folder: GraphFolderT | None,
-) -> GraphFolderT | None:
+) -> GraphFolderT:
     """Get a mailbox root folder by name or a subfolder of a folder by its qualified path.
 
     Args:
@@ -706,24 +714,36 @@ def graph_get_folder_by_path(
         parent_folder (GraphFolderT | None): The parent folder or None to search the mailbox root.
 
     Returns:
-        GraphFolderT | None: The folder object if found, otherwise None.
+        GraphFolderT: The folder object.
 
     Raises:
         requests.RequestException derived error.
+        GraphEmptyRootFolderError: If the root information store of the mailbox cannot be retrieved.
+        GraphFolderNotFoundError: Raised if any of the specified folder paths cannot be resolved.
     """
     folder_path = folder_path if isinstance(folder_path, Path) else Path(folder_path)
     path_parts = list(folder_path.parts)
     folder_name = path_parts.pop(0)
     folder = None
 
-    folders_by_name = graph_enum_folders(session, graph_config, parent_folder)
-    if folders_by_name:
-        folder = folders_by_name.get(folder_name.lower())
-        if folder and path_parts:
-            # Recursively navigate children by the remaining path parts.
-            folder = graph_get_folder_by_path(session, graph_config, Path(*path_parts), folder)
+    folders_by_name = graph_enum_folders(
+        session,
+        graph_config,
+        parent_folder,
+        include_internal=True,
+    )
 
-    return folder
+    folder = folders_by_name.get(folder_name.lower())
+    if not folder:
+        fullpath = Path(parent_folder["folderPath"]) / folder_name if parent_folder else folder_name
+        errmsg = f"'{fullpath}': No such mail folder."
+        raise GraphFolderNotFoundError(errmsg)
+
+    if not path_parts:
+        return folder
+
+    # Recursively navigate children by the remaining path parts.
+    return graph_get_folder_by_path(session, graph_config, Path(*path_parts), folder)
 
 
 def path_with_vars(p: str | Path, *, absolute: bool = True, resolve: bool = False) -> Path:
@@ -801,7 +821,7 @@ def graph_walk_mailbox(
 
     Raises:
         requests.RequestException derived error.
-        ValueError: If the root information store of the mailbox cannot be retrieved.
+        GraphEmptyRootFolderError: If the root information store of the mailbox cannot be retrieved.
     """
     root_folders = graph_enum_folders(session, graph_config, MAILBOX_ROOT)
     return graph_walk_folders(session, graph_config, root_folders.values(), maxdepth=maxdepth)
@@ -810,7 +830,7 @@ def graph_walk_mailbox(
 def graph_resolve_folder_paths(
     session: sessions.Session,
     graph_config: GraphApiConfig,
-    folder_names: list[str] | None,
+    folder_paths: list[str] | None,
     *,
     maxdepth: int,
 ) -> list[GraphFolderT]:
@@ -819,7 +839,7 @@ def graph_resolve_folder_paths(
     Args:
         session (sessions.Session): Session to use to pool requests.
         graph_config (GraphApiConfig): Graph API configuration.
-        folder_names (list[str] | None): List of folder paths to resolve. If None, all root folders are considered.
+        folder_paths (list[str] | None): List of folder paths to resolve. If None, all root folders are considered.
         maxdepth (int): Maximum depth to traverse the folder hierarchy.
 
     Returns:
@@ -828,20 +848,16 @@ def graph_resolve_folder_paths(
     Raises:
         requests.RequestException derived error.
         GraphFolderNotFoundError: Raised if any of the specified folder paths cannot be resolved.
-        ValueError: If the root information store of the mailbox cannot be retrieved.
+        GraphEmptyRootFolderError: If the root information store of the mailbox cannot be retrieved.
     """
     folders: list[GraphFolderT] = []
 
-    if folder_names:
+    if folder_paths is not None:
         # Ignore duplicate names while preserving original casing
-        folder_names = list({n.lower(): n for n in folder_names}.values())
+        folder_paths = list({n.lower(): n for n in folder_paths}.values())
 
-        for folder_path in folder_names:
+        for folder_path in folder_paths:
             folder = graph_get_folder_by_path(session, graph_config, folder_path, MAILBOX_ROOT)
-            if not folder:
-                errmsg = f"'{folder_path}': No such mail folder."
-                raise GraphFolderNotFoundError(errmsg)
-
             folders.append(folder)
     else:
         folders = list(graph_enum_folders(session, graph_config, MAILBOX_ROOT).values())

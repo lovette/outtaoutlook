@@ -40,9 +40,9 @@ from outlook2obsidian.shared import (
     AuthRequiredError,
     CommandContext,
     GraphApiConfig,
+    GraphApiError,
     GraphApiReturnT,
     GraphAttachmentT,
-    GraphFolderNotFoundError,
     GraphFolderT,
     GraphMessageT,
     NoteMetaPropT,
@@ -1810,6 +1810,6 @@ def export(  # noqa: PLR0913, PLR0917
     except AuthRequiredError as err:
         err_console.print(f"{err} {AUTH_ERROR_USECOMMAND}")
         raise typer.Exit(code=1) from err
-    except (GraphFolderNotFoundError, ValueError, OSError) as err:
+    except (GraphApiError, ValueError, OSError) as err:
         err_console.print(f"Error: {err}")
         raise typer.Exit(code=1) from err
