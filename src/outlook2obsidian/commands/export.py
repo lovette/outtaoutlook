@@ -670,6 +670,38 @@ def _convert_to_markdown(body_content: str) -> str | None:
     return convert_result.content
 
 
+def _list_messages(
+    session: sessions.Session,
+    graph_config: GraphApiConfig,
+    url: str,
+    params: dict[str, Any] | None = None,
+) -> GraphApiReturnT:
+    """Get a list of messages.
+
+    Args:
+        session (sessions.Session): Requests session to pool requests.
+        graph_config (GraphApiConfig): Graph API configuration.
+        url (str): Entity URL.
+        params (dict, optional): Query parameters for the GET request. Defaults to None.
+
+    Returns:
+        GraphApiReturnT: JSON response from the Microsoft Graph API.
+
+    Raises:
+        requests.ConnectionError: If there is a network-related error during the HTTP request.
+        requests.Timeout: If the HTTP request times out.
+        requests.HTTPError: If the HTTP request to the Microsoft Graph API fails.
+        requests.RequestException: For other errors during the HTTP request (base class.)
+        requests.exceptions.JSONDecodeError: If the response body is not valid JSON.
+    """
+    headers = {
+        # https://learn.microsoft.com/en-us/graph/outlook-immutable-id
+        "Prefer": 'IdType="ImmutableId"',
+    }
+
+    return graph_get_resource(session, graph_config, url, params=params, headers=headers)
+
+
 def _list_attachments(
     session: sessions.Session,
     graph_config: GraphApiConfig,
@@ -1130,7 +1162,7 @@ def _export_folder_batch(  # noqa: PLR0913, PLR0917
     Raises:
         requests.RequestException derived error.
     """
-    data = first_batch_data or graph_get_resource(session, graph_config, url, params)
+    data = first_batch_data or _list_messages(session, graph_config, url, params=params)
 
     messages = data.get("value", [])
     next_url = data.get("@odata.nextLink")
@@ -1216,7 +1248,7 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
     if manifest_file_path and manifest_file_path.is_file():
         logger.info("Loading export manifest: '%s'", manifest_file_path)
         manifest_data = json.loads(manifest_file_path.read_text())
-        manifest_ids = set(manifest_data.get("message_ids", []))
+        manifest_ids = set(manifest_data.get("messageImmutableIds", []))
 
     exported_total_count = len(manifest_ids)
     notes_dir = export_opts.notes_dir
@@ -1305,7 +1337,7 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
 
     # Request the first batch now so we can get a count of the results.
     try:
-        first_batch_data = graph_get_resource(session, graph_config, next_url, params)
+        first_batch_data = _list_messages(session, graph_config, next_url, params=params)
     except requests.HTTPError:
         if export_opts.filter_query:
             field = "filter"
@@ -1405,9 +1437,10 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
                 manifest_file_path.write_text(
                     json.dumps(
                         {
+                            "date": datetime_now().isoformat(),
                             "folderId": folder["id"],
                             "folderPath": folder["folderPath"],
-                            "message_ids": list(manifest_ids),
+                            "messageImmutableIds": list(manifest_ids),
                         },
                     ),
                 )

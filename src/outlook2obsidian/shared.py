@@ -450,6 +450,7 @@ def graph_get_resource(  # noqa: C901
     graph_config: GraphApiConfig,
     url: str,
     params: dict[str, Any] | None = None,
+    headers: dict[str, Any] | None = None,
 ) -> GraphApiReturnT:
     """Execute a GET request to Microsoft Graph API.
 
@@ -458,6 +459,7 @@ def graph_get_resource(  # noqa: C901
         graph_config (GraphApiConfig): Graph API configuration.
         url (str): Entity URL.
         params (dict, optional): Query parameters for the GET request. Defaults to None.
+        headers (dict, optional): HTTP headers for the GET request. Defaults to None.
 
     Returns:
         GraphApiReturnT: JSON response from the Microsoft Graph API.
@@ -534,12 +536,15 @@ def graph_get_resource(  # noqa: C901
             "size": len(resp.content),
         }
 
-    headers = {
+    req_headers = {
         "Authorization": f"Bearer {graph_config.access_token}",
         "Content-Type": "application/json",
     }
 
-    req = requests.Request("GET", url, headers=headers, params=params).prepare()
+    if headers:
+        req_headers.update(headers)
+
+    req = requests.Request("GET", url, headers=req_headers, params=params).prepare()
     assert req.url is not None  # noqa: S101
 
     cache_file_path, cache_json_header = _get_cache_file_path_and_header()
