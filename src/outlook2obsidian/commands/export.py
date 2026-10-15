@@ -18,7 +18,8 @@ from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any
+from types import UnionType
+from typing import TYPE_CHECKING, Annotated, Any, get_args
 from urllib.parse import unquote
 
 import requests
@@ -1547,6 +1548,43 @@ def _build_filter_query(
     return filter_query, search_query
 
 
+def _validate_config_file_collection(
+    config_opt: str,
+    collection: list[Any] | dict[str, Any],
+    collection_type: type,
+    item_type: type | UnionType,
+) -> None:
+    if collection is not None:
+        if not isinstance(collection, collection_type):
+            errmsg = (
+                f"Configuration file error: Expected '{config_opt}' to be a {collection_type.__name__}, "
+                f"got a {type(collection).__name__} instead"
+            )
+            raise typer.BadParameter(errmsg)
+
+        items = collection if isinstance(collection, list) else collection.values()
+
+        if isinstance(item_type, UnionType):
+            item_types = get_args(item_type)  # str | int | bool
+            item_types_str = ", ".join(t.__name__ for t in item_types)  # "str, int, bool"
+
+            for item in items:
+                if not any(isinstance(item, t) for t in item_types):
+                    errmsg = (
+                        f"Configuration file error: '{config_opt}' must be a {collection_type.__name__} "
+                        f"of types {item_types_str}; found a '{type(item).__name__}' instead"
+                    )
+                    raise typer.BadParameter(errmsg)
+        else:
+            for item in items:
+                if not isinstance(item, item_type):
+                    errmsg = (
+                        f"Configuration file error: '{config_opt}' must be a {collection_type.__name__} "
+                        f"of type {item_type.__name__}; found a '{type(item).__name__}' instead"
+                    )
+                    raise typer.BadParameter(errmsg)
+
+
 ######################################################################
 # Commands
 
@@ -1740,6 +1778,14 @@ def export(  # noqa: PLR0913, PLR0917
     config_file_filters: list[str] = config_file_export_opts.get("filter", [])
     config_file_search: list[str] = config_file_export_opts.get("search", [])
     config_file_not_folder: list[str] = config_file_export_opts.get("not_folder", [])
+
+    # Simple YAML syntax changes can result in values being interpreted as the wrong type!
+    _validate_config_file_collection("tag", config_file_tags, list, str)
+    _validate_config_file_collection("body_tag", config_file_body_tags, list, str)
+    _validate_config_file_collection("metaprop", config_file_metaprop, dict, str | int | bool)
+    _validate_config_file_collection("filter", config_file_filters, list, str)
+    _validate_config_file_collection("search", config_file_search, list, str)
+    _validate_config_file_collection("not_folder", config_file_not_folder, list, str)
 
     note_tags = config_file_tags + (tag or [])
     note_body_tags = config_file_body_tags + (body_tag or [])
