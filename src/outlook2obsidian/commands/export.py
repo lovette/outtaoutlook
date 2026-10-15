@@ -68,7 +68,7 @@ logger = logging.getLogger(APP_NAME)  # initialized in __main__
 # Constants
 
 TITLE_UNTITLED = "Untitled"
-TITLE_MAXLEN = 255 - 5  # macOS limit minus a few characters for `_unique_out_path`
+TITLE_MAXLEN = 255 - 25  # macOS limit minus a few characters for whatever `_unique_out_path` tacks on
 MIN_PROGRESS_THRESHOLD = 10  # Hide progress if only a few messages
 EXPORT_FOLDER_MSGFOLDERROOT = "msgfolderroot"
 
@@ -358,11 +358,12 @@ def _safe_title(subject: str, default: str) -> str:
     return subject or default
 
 
-def _unique_out_path(p: Path) -> Path:
-    """Create a Path with unique file name.
+def _unique_out_path(p: Path, date_hint: datetime | None = None) -> Path:
+    """Create a Path with unique file name, optionally using a date hint.
 
     Args:
         p (Path): Existing path.
+        date_hint (datetime | None): Optional datetime to include in the filename for uniqueness.
 
     Raises:
         ValueError: Raised if too many copies of the file already exist.
@@ -371,18 +372,28 @@ def _unique_out_path(p: Path) -> Path:
         Path: Unique path with a non-conflicting file name.
     """
     n = 1
-    max_paths = 100
+    max_paths = 10000
     unique_path = p
+
+    # Keep in mind we need to keep the final filename within TITLE_MAXLEN characters.
 
     while unique_path.exists() and n < max_paths:
         unique_path = p.with_stem(f"{p.stem} ({n})")
         n += 1
 
-    if n == max_paths:
-        errmsg = f"{n} copies of '{p}' already exist?!"
-        raise ValueError(errmsg)
+    if n == max_paths and date_hint:
+        # Try using the date hint to create a unique filename.
+        n = 1
+        unique_path = p.with_stem(f"{p.stem} {date_hint:%Y%m%d%H%M%S}")
+        while unique_path.exists() and n < max_paths:
+            unique_path = p.with_stem(f"{p.stem} {date_hint:%Y%m%d%H%M%S} ({n})")
+        n += 1
 
-    return unique_path
+    if not unique_path.exists():
+        return unique_path
+
+    errmsg = f"{n} copies of '{p}' already exist?!"
+    raise ValueError(errmsg)
 
 
 def _coerce_datetime(dt: str | None) -> datetime | None:
@@ -850,7 +861,7 @@ def _save_attachment(  # noqa: PLR0913, PLR0917
     assert isinstance(export_opts.attachments_folder, Path)  # noqa: S101
     assert export_opts.attachments_folder.is_absolute()  # noqa: S101
 
-    attachment_path = _unique_out_path(export_opts.attachments_folder / Path(attachment["name"]))
+    attachment_path = _unique_out_path(export_opts.attachments_folder / Path(attachment["name"]), note_date)
 
     if export_opts.dry_run:
         logger.debug("Wrote attachment to '%s' (%s) (dry run)", attachment_path.name, content_type)
@@ -1014,7 +1025,6 @@ def _export_message(  # noqa: C901, PLR0912, PLR0915
     body_content: str | None = message.get("body", {}).get("content")
     content_type: str | None = message.get("body", {}).get("contentType")
     has_attachments: bool | None = message.get("hasAttachments")
-    note_path = _unique_out_path(export_opts.notes_dir / Path(title + ".md"))
     dt_now = datetime_now()
     note_body = body_content
 
@@ -1079,6 +1089,7 @@ def _export_message(  # noqa: C901, PLR0912, PLR0915
 
     note_content: list[str] = []
     attachment_links: list[str] = []
+    note_path = _unique_out_path(export_opts.notes_dir / Path(title + ".md"), note_date)
 
     # Save attachments and get links to them
     if has_attachments and export_opts.with_attachments:
