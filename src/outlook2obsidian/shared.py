@@ -149,6 +149,13 @@ GRAPH_MESSAGE_FIELDS_SET = set(GRAPH_MESSAGE_FIELDS)
 GRAPH_APPMETADATA_FIELDS_SET = set(GRAPH_APPMETADATA_FIELDS)
 GRAPH_ATTACHMENT_FIELDS_SET = set(GRAPH_ATTACHMENT_FIELDS)
 
+# wellKnownName of folders that make no sense to export
+INTERNAL_FOLDERS = {
+    "conversationhistory",
+    "deleteditems",
+    "outbox",
+    "syncissues",
+}
 
 ######################################################################
 # Types and classes
@@ -618,6 +625,8 @@ def graph_enum_folders(
     session: sessions.Session,
     graph_config: GraphApiConfig,
     parent_folder: GraphFolderT | None,
+    *,
+    include_internal: bool = False,
 ) -> dict[str, GraphFolderT]:
     """Enumerate mailbox root folders or subfolders of a specific folder.
 
@@ -625,6 +634,7 @@ def graph_enum_folders(
         session (sessions.Session): Session to use to pool requests.
         graph_config (GraphApiConfig): Graph API configuration.
         parent_folder (GraphFolderT | None): The parent folder or None to list mailbox root folders.
+        include_internal (bool, optional): Whether to include internal folders. Defaults to False.
 
     Returns:
         dict[str, GraphFolderT]: A dictionary mapping folder names (lower cased) to folder properties.
@@ -652,7 +662,18 @@ def graph_enum_folders(
         data = graph_get_resource(session, graph_config, url, params=params)
 
         for folder in data.get("value", []):
+            is_internal_folder = (
+                not parent_folder["folderParent"]
+                and folder["wellKnownName"]
+                and folder["wellKnownName"].lower() in INTERNAL_FOLDERS
+            )
+
+            # Exclude toplevel wellknown folders from export.
+            if is_internal_folder and not include_internal:
+                continue
+
             # Add some custom properties.
+            folder["internalUse"] = is_internal_folder
             folder["folderParent"] = parent_folder
             folder["folderPath"] = (
                 folder["displayName"]
@@ -737,6 +758,10 @@ def graph_get_folder_by_path(
     if not folder:
         fullpath = Path(parent_folder["folderPath"]) / folder_name if parent_folder else folder_name
         errmsg = f"'{fullpath}': No such mail folder."
+        raise GraphFolderNotFoundError(errmsg)
+
+    if folder["internalUse"]:
+        errmsg = f"'{folder_name}': Folder is for internal use only."
         raise GraphFolderNotFoundError(errmsg)
 
     if not path_parts:
