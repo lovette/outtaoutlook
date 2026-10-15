@@ -1501,7 +1501,7 @@ def _build_filter_query(
     """
 
     def _quote_search(s: str) -> str:
-        return s if s[:1] == '"' else f'"{s}"'
+        return s if (s.startswith('"') and s.endswith('"')) else f'"{s.replace('"', '\\"')}"'
 
     def _quote_paren(s: str) -> str:
         return f"({s})" if RE_AND_OR.search(s) else s
