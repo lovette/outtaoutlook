@@ -83,6 +83,16 @@ ATTACHMENT_DATATYPE_FILE = "#microsoft.graph.fileAttachment"
 ATTACHMENT_DATATYPE_ITEM = "#microsoft.graph.itemAttachment"
 ATTACHMENT_DATATYPE_REFERENCE = "#microsoft.graph.referenceAttachment"
 
+MESSAGE_DATATYPE_EVENT_MESSAGE = "#microsoft.graph.eventMessage"
+MESSAGE_DATATYPE_EVENT_MESSAGE_REQUEST = "#microsoft.graph.eventMessageRequest"
+MESSAGE_DATATYPE_EVENT_MESSAGE_RESPONSE = "#microsoft.graph.eventMessageResponse"
+
+MESSAGE_DATATYPE_EVENT_MESSAGE_SET = {
+    MESSAGE_DATATYPE_EVENT_MESSAGE,
+    MESSAGE_DATATYPE_EVENT_MESSAGE_REQUEST,
+    MESSAGE_DATATYPE_EVENT_MESSAGE_RESPONSE,
+}
+
 # These are banned outright: \/:
 # Links do not work if title includes: #^[]|
 # macOS is fine with: *"<>?
@@ -149,6 +159,7 @@ class ExportStat(StrEnum):
     STAT_SKIPPED_NO_MESSAGE_CONTENT_JUST_ATTACHMENTS = "Skipped; No message content, just attachments"
     STAT_SKIPPED_NO_MESSAGE_CONTENT_NO_ATTACHMENTS = "Skipped; No message content, no attachments"
     STAT_SKIPPED_NO_MESSAGE_CONTENT_UNKNOWN = "Skipped; No message content, unknown reason"
+    STAT_SKIPPED_EVENT_MESSAGE = "Skipped; Calendar event"
 
 
 @dataclass
@@ -1027,6 +1038,8 @@ def _export_message(  # noqa: C901, PLR0912, PLR0915
     has_attachments: bool | None = message.get("hasAttachments")
     dt_now = datetime_now()
     note_body = body_content
+    data_type: str | None = message.get("@odata.type")
+    is_calendar_related = data_type and data_type in MESSAGE_DATATYPE_EVENT_MESSAGE_SET
 
     _fix_dates(message, bool(is_draft))
 
@@ -1035,15 +1048,19 @@ def _export_message(  # noqa: C901, PLR0912, PLR0915
         note_date = message["lastModifiedDateTime"] or message["createdDateTime"]
 
     if body_content:
-        if content_type == "html":
+        if is_calendar_related:
+            pass  # Calendar requests and responses are skipped
+        elif content_type == "html":
             note_body = _convert_to_markdown(body_content)
         elif content_type != "text":
             _log_message_notice(message, f"field('contentType'): unexpected type: '{content_type}'")
 
-    if not note_body:
+    if not note_body or is_calendar_related:
         skip_reason, level = None, logging.INFO
 
-        if body_content is None:
+        if is_calendar_related:
+            skip_reason, level = ExportStat.STAT_SKIPPED_EVENT_MESSAGE, logging.DEBUG
+        elif body_content is None:
             skip_reason, level = ExportStat.STAT_SKIPPED_NO_MESSAGE_BODY, logging.WARNING
         elif note_body is None:
             skip_reason, level = ExportStat.STAT_SKIPPED_MARKDOWN_CONVERSION_FAILED, logging.WARNING
