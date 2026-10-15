@@ -686,29 +686,6 @@ def graph_get_folder_by_id(
     return folder
 
 
-def graph_get_folder_by_name(
-    session: sessions.Session,
-    graph_config: GraphApiConfig,
-    folder_name: str,
-    parent_folder: GraphFolderT | None,
-) -> GraphFolderT | None:
-    """Get a mailbox root folder or a subfolder of a folder by its name.
-
-    Args:
-        session (sessions.Session): Session to use to pool requests.
-        graph_config (GraphApiConfig): Graph API configuration.
-        folder_name (str): The name of the folder to retrieve.
-        parent_folder (GraphFolderT | None): The parent folder or None to search mailbox root.
-
-    Returns:
-        GraphFolderT | None: The folder object if found, otherwise None.
-
-    Raises:
-        requests.RequestException derived error.
-    """
-    return graph_get_folder_by_path(session, graph_config, folder_name, parent_folder)
-
-
 def graph_get_folder_by_path(
     session: sessions.Session,
     graph_config: GraphApiConfig,
