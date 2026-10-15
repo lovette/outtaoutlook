@@ -489,7 +489,7 @@ def graph_get_resource(  # noqa: C901
         }
 
         cache_file_key = json.dumps(cache_json_header, sort_keys=True)  # sort to keep deterministic
-        cache_file_name = Path("graph_api_" + hashlib.sha256(cache_file_key.encode("utf-8")).hexdigest() + ".json")
+        cache_file_name = get_hash_filename(cache_file_key, "graph_api", ".json")
         cache_file_path = graph_config.cache_dir / cache_file_name
 
         return cache_file_path, cache_json_header
@@ -862,3 +862,20 @@ def print_graph_request_exception(err: requests.RequestException) -> None:
         err_console.print(f"Error: {resp_error_message} [{resp_error_code}]; {err}")
     else:
         err_console.print(f"Error: {err}")
+
+
+def get_hash_filename(content: str, prefix: str, suffix: str) -> Path:
+    """Generate a hash-based filename for the given content.
+
+    Args:
+        content (str): The content to hash.
+        prefix (str): The prefix to prepend to the filename.
+        suffix (str): The suffix to append to the filename (e.g. ".json")
+
+    Returns:
+        Path
+    """
+    # Truncating to 32 characters gives us a shorter filename with negligible collision risk.
+    full_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    short_hash = full_hash[:32]
+    return Path(f"{prefix}_{short_hash}{suffix}")

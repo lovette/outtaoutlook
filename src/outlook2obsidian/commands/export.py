@@ -3,7 +3,6 @@
 import base64
 import binascii
 import copy
-import hashlib
 import json
 import logging
 import mimetypes
@@ -51,6 +50,7 @@ from outlook2obsidian.shared import (
     datetime_now,
     err_console,
     get_graph_config,
+    get_hash_filename,
     graph_get_resource,
     graph_resolve_folder_paths,
     path_with_vars,
@@ -1210,7 +1210,7 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         return
 
     manifest_ids = set()
-    manifest_file_name = Path("export_manifest_" + hashlib.sha256(folder["id"].encode("utf-8")).hexdigest() + ".json")
+    manifest_file_name = get_hash_filename(folder["id"], "export_manifest", ".json")
     manifest_file_path = (manifest_dir / manifest_file_name) if manifest_dir else None
 
     if manifest_file_path and manifest_file_path.is_file():
