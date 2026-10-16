@@ -1192,7 +1192,7 @@ def _export_folder_batch(  # noqa: PLR0913, PLR0917
     exported_ids: set[str],
     export_opts: ExportOptions,
     export_stats: ExportStatsT,
-) -> tuple[set[str], int, str | None]:
+) -> tuple[int, str | None]:
     """Export a batch of messages from a specific folder.
 
     Args:
@@ -1204,12 +1204,12 @@ def _export_folder_batch(  # noqa: PLR0913, PLR0917
         url (str): The URL for the API request.
         params (dict[str, Any] | None): The query parameters for the API request.
         batch_limit (int): The maximum number of messages to export in this batch.
-        exported_ids (set[str]): The set of message IDs that have already been exported.
+        exported_ids (set[str]): The set of message IDs that have already been exported. Modified in-place.
         export_opts (ExportOptions): Options for exporting messages.
         export_stats (ExportStats): Export statistics dictionary to update.
 
     Returns:
-        tuple[set[str], int, str | None]: [set(Message-Id), Number of messages exported in this batch (including dups),
+        tuple[int, str | None]: [Number of messages exported in this batch (including dups),
             Link to next batch of messages or None if there are no more batches]
 
     Raises:
@@ -1220,7 +1220,6 @@ def _export_folder_batch(  # noqa: PLR0913, PLR0917
 
     messages = data.get("value", [])
     next_url = data.get("@odata.nextLink")
-    batch_ids = set()
 
     for message in messages:
         if message["id"] not in exported_ids:
@@ -1231,7 +1230,8 @@ def _export_folder_batch(  # noqa: PLR0913, PLR0917
                 export_opts,
                 export_stats,
             )
-            batch_ids.add(message["id"])
+
+            exported_ids.add(message["id"])
         else:
             _exportstat_incr(export_stats, ExportStat.STAT_SKIPPED_DUPLICATE)
 
@@ -1241,7 +1241,7 @@ def _export_folder_batch(  # noqa: PLR0913, PLR0917
         if batch_limit <= 0:
             break
 
-    return batch_ids, len(messages), next_url
+    return len(messages), next_url
 
 
 def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
@@ -1285,6 +1285,21 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
             else:
                 logger.info("Created %s directory '%s' (dry run)", name, dir_path)
 
+    def _write_manifest() -> None:
+        if manifest_file_path:
+            manifest_file_path.write_text(
+                json.dumps(
+                    {
+                        "date": datetime_now().isoformat(),
+                        "folderId": folder["id"],
+                        "folderPath": folder["folderPath"],
+                        "messageImmutableIds": list(manifest_ids),
+                    },
+                ),
+            )
+
+            logger.debug("Wrote export manifest: '%s'", manifest_file_path)
+
     folder_message_count = folder["totalItemCount"]
 
     if not export_opts.filter_test:
@@ -1295,7 +1310,7 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         console.print("Folder is empty")
         return
 
-    manifest_ids = set()
+    manifest_ids: set[str] = set()
     manifest_file_name = get_hash_filename(folder["id"], "export_manifest", ".json")
     manifest_file_path = (manifest_dir / manifest_file_name) if manifest_dir else None
 
@@ -1466,40 +1481,33 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         progress_task = progress.add_task("", total=export_limit, completed=exported_total_count)
 
         while next_url is not None and exported_total_count < export_limit:
-            batch_ids, batch_total, next_url = _export_folder_batch(
-                session,
-                graph_config,
-                progress,
-                progress_task,
-                first_batch_data,
-                next_url,
-                params,
-                min(batch_size, export_limit - exported_total_count),
-                manifest_ids,
-                export_opts,
-                export_stats,
-            )
+            try:
+                batch_total, next_url = _export_folder_batch(
+                    session,
+                    graph_config,
+                    progress,
+                    progress_task,
+                    first_batch_data,
+                    next_url,
+                    params,
+                    min(batch_size, export_limit - exported_total_count),
+                    manifest_ids,
+                    export_opts,
+                    export_stats,
+                )
 
-            manifest_ids |= batch_ids
+            except requests.RequestException, GraphApiError, ValueError, OSError:
+                # Try to keep the manifest up-to-date even if an error occurs.
+                _write_manifest()
+                raise
+            else:
+                # Doing this on every batch is inefficient for large folders but
+                # ensures the manifest is mostly up-to-date if a truly fatal error occurs.
+                _write_manifest()
+
             exported_total_count += batch_total
             params = None  # included in 'nextLink' automatically
             first_batch_data = None
-
-            if manifest_file_path:
-                # Doing this on every batch is inefficient for large folders but
-                # ensures the manifest is mostly up-to-date if an exception occurs.
-                manifest_file_path.write_text(
-                    json.dumps(
-                        {
-                            "date": datetime_now().isoformat(),
-                            "folderId": folder["id"],
-                            "folderPath": folder["folderPath"],
-                            "messageImmutableIds": list(manifest_ids),
-                        },
-                    ),
-                )
-
-                logger.debug("Wrote export manifest: '%s'", manifest_file_path)
 
     console.print("Folder results:")
     for stat, stat_count in export_stats.items():
