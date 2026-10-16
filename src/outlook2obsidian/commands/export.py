@@ -1645,6 +1645,7 @@ def export(  # noqa: PLR0913, PLR0917
         typer.Option(
             "--tag",
             "-t",
+            metavar="TAG",
             help="Tag to apply to notes (placed either in frontmatter or body); option can be used more than once.",
         ),
     ] = None,
@@ -1653,6 +1654,7 @@ def export(  # noqa: PLR0913, PLR0917
         typer.Option(
             "--body-tag",
             "-b",
+            metavar="TAG",
             help="Tag to place in notes body; option can be used more than once.",
         ),
     ] = None,
@@ -1662,6 +1664,7 @@ def export(  # noqa: PLR0913, PLR0917
             "--metaprop",
             "-p",
             callback=_opt_metaprop_callback,
+            metavar="NAME=VALUE",
             help="Frontmatter metadata property to apply to notes; option can be used more than once.",
         ),
     ] = None,
@@ -1670,6 +1673,7 @@ def export(  # noqa: PLR0913, PLR0917
         typer.Option(
             "--filter",
             "-f",
+            metavar="CONDITION",
             help="Export messages matching filter criteria; option can be used more than once.",
         ),
     ] = None,
@@ -1692,6 +1696,7 @@ def export(  # noqa: PLR0913, PLR0917
         typer.Option(
             "--search",
             "-s",
+            metavar="CONDITION",
             help="Export messages matching search criteria; option can be used more than once.",
         ),
     ] = None,
@@ -1793,7 +1798,15 @@ def export(  # noqa: PLR0913, PLR0917
         ),
     ] = False,
 ) -> None:
-    """Export messages from mailbox FOLDER to VAULT."""
+    """Export messages from mailbox FOLDER to VAULT.
+
+    For guidance on using filters, see:
+    https://learn.microsoft.com/en-us/graph/filter-query-parameter
+
+    For guidance on using search, see:
+    https://learn.microsoft.com/en-us/graph/search-query-parameter
+
+    """
     # Options common to all commands
     ctx_obj: CommandContext = ctx.obj
 
