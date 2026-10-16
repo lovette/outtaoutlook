@@ -508,21 +508,34 @@ def graph_get_resource(  # noqa: C901
 
         return cache_file_path, cache_json_header
 
-    def _get_cached_response(cache_file_path: Path, req_url: str) -> GraphApiReturnT | None:
-        if cache_file_path.is_file():
-            cached_resp_json = json.loads(cache_file_path.read_text(encoding="utf-8"))
+    def _get_cached_response(req_url: str) -> GraphApiReturnT | None:
+        if not (cache_file_path and cache_file_path.is_file()):
+            return None
 
-            response = cached_resp_json.get("response")
-            if response:
-                logger.debug(
-                    'Using cached Graph API response for "GET %s" - %d',
-                    req_url,
-                    response.get("contentLength"),
+        cached_resp_json = json.loads(cache_file_path.read_text(encoding="utf-8"))
+
+        response = cached_resp_json.get("response")
+        if not response:
+            return None
+
+        # The cached request must match the current request and authentication details.
+        for key in ("request", "auth"):
+            if cache_json_header[key] != cached_resp_json[key]:
+                logger.warning(
+                    "Graph API cache mismatch! %s(%s) != cached(%s)",
+                    key,
+                    cache_json_header[key],
+                    cached_resp_json[key],
                 )
+                return None
 
-                return response["content"]
+        logger.debug(
+            'Using cached Graph API response for "GET %s" - %d',
+            req_url,
+            response.get("contentLength"),
+        )
 
-        return None
+        return response["content"]
 
     def _get_content_as_json(resp: requests.Response) -> dict[str, Any]:
         # e.g. "application/json; odata.metadata=minimal; odata.streaming=true; IEEE754Compatible=false; charset=utf-8"
@@ -562,7 +575,7 @@ def graph_get_resource(  # noqa: C901
     cache_file_path, cache_json_header = _get_cache_file_path_and_header()
 
     if cache_file_path:
-        resp_json = _get_cached_response(cache_file_path, req.url)
+        resp_json = _get_cached_response(req.url)
         if resp_json is not None:
             return resp_json
 
