@@ -176,11 +176,12 @@ class ExportOptions:
     dry_run: bool  # Whether to perform a dry run without making any changes.
     filter_query: str | None  # --filter criteria from command line and config file.
     filter_test: bool  # Whether to perform a filter test without exporting.
-    notes_mkdir: bool  # Create mail folder hierarchy in notes directory.
+    mkdir_maxdepth: int | None  # Maximum depth (from the leaf) of folder tree to create when creating mail folder hierarchy.
     note_body_tags: list[str] | None  # --body-tag tags from command line and config file.
     note_metaprop: NoteMetaPropT | None  # --metaprop properties from command line and config file.
     note_tags: list[str] | None  # --tag tags from command line and config file.
     notes_dir: Path  # Directory to save notes (set internally.)
+    notes_mkdir: bool  # Create mail folder hierarchy in notes directory.
     place_tags_body_end: bool  # True to place body tags at the end of the note instead the top.
     place_tags_frontmatter: bool  # True to place non-body tags in frontmatter.
     search_query: str | None  # --search criteria from command line and config file.
@@ -1325,7 +1326,11 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
     attachments_mkdir = export_opts.attachments_mkdir
 
     if export_opts.notes_mkdir:
-        notes_dir = notes_dir / Path(folder["folderPath"])
+        notes_dir = notes_dir / (
+            Path(folder["folderPath"])
+            if not export_opts.mkdir_maxdepth
+            else Path(*Path(folder["folderPath"]).parts[-export_opts.mkdir_maxdepth :])
+        )
 
     if isinstance(export_opts.attachments_folder, Path):
         assert attachments_dir_path.is_dir()  # noqa: S101 ; caller should have verified!
@@ -1341,7 +1346,11 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         attachments_mkdir = False
 
     if attachments_mkdir:
-        attachments_dir_path = attachments_dir_path / Path(folder["folderPath"])
+        attachments_dir_path = attachments_dir_path / (
+            Path(folder["folderPath"])
+            if not export_opts.mkdir_maxdepth
+            else Path(*Path(folder["folderPath"]).parts[-export_opts.mkdir_maxdepth :])
+        )
 
     if not export_opts.filter_test:
         console.print(f"Saving notes to '{notes_dir}'")
@@ -1768,6 +1777,14 @@ def export(  # noqa: PLR0913, PLR0917
             help="Maximum depth of folder tree to export.",
         ),
     ] = 1,
+    mkdir_maxdepth: Annotated[
+        int | None,
+        typer.Option(
+            "--mkdir-maxdepth",
+            min=1,
+            help="Maximum depth (from the leaf) of folder tree to create when creating mail folder hierarchy.",
+        ),
+    ] = None,
     use_manifest: Annotated[  # noqa: FBT002
         bool,
         typer.Option(
@@ -1855,11 +1872,12 @@ def export(  # noqa: PLR0913, PLR0917
             dry_run=dry_run,
             filter_query=filter_query,
             filter_test=filter_test,
-            notes_mkdir=notes_mkdir,
+            mkdir_maxdepth=mkdir_maxdepth,
             note_body_tags=note_body_tags or None,
             note_metaprop=note_metaprop or None,
             note_tags=note_tags or None,
             notes_dir=vault_dir,
+            notes_mkdir=notes_mkdir,
             place_tags_body_end=place_tags_body_end,
             place_tags_frontmatter=place_tags_frontmatter,
             search_query=search_query,
