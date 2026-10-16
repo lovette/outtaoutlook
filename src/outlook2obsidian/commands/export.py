@@ -38,12 +38,12 @@ from outlook2obsidian.shared import (
     GRAPH_API_URL,
     GRAPH_MESSAGE_FIELDS_SET,
     MAILBOX_ROOT,
-    AuthRequiredError,
     CommandContext,
     GraphApiConfig,
     GraphApiError,
     GraphApiReturnT,
     GraphAttachmentT,
+    GraphAuthRequiredError,
     GraphFolderT,
     GraphMessageT,
     NoteMetaPropT,
@@ -140,6 +140,10 @@ yaml.SafeDumper.add_representer(Decimal, _yaml_represent_decimal)
 # Types and classes
 
 FrontmatterT = dict[str, str | int | Decimal | bool | Sequence[str | int]]
+
+
+class ExportError(GraphApiError):
+    """Export failure."""
 
 
 class FilterJoinCond(StrEnum):
@@ -377,7 +381,7 @@ def _unique_out_path(p: Path, date_hint: datetime | None = None) -> Path:
         date_hint (datetime | None): Optional datetime to include in the filename for uniqueness.
 
     Raises:
-        ValueError: Raised if too many copies of the file already exist.
+        ExportError: Raised if too many copies of the file already exist.
 
     Returns:
         Path: Unique path with a non-conflicting file name.
@@ -404,7 +408,7 @@ def _unique_out_path(p: Path, date_hint: datetime | None = None) -> Path:
         return unique_path
 
     errmsg = f"{n} copies of '{p}' already exist?!"
-    raise ValueError(errmsg)
+    raise ExportError(errmsg)
 
 
 def _coerce_datetime(dt: str | None) -> datetime | None:
@@ -710,11 +714,8 @@ def _list_messages(
         GraphApiReturnT: JSON response from the Microsoft Graph API.
 
     Raises:
-        requests.ConnectionError: If there is a network-related error during the HTTP request.
-        requests.Timeout: If the HTTP request times out.
-        requests.HTTPError: If the HTTP request to the Microsoft Graph API fails.
-        requests.RequestException: For other errors during the HTTP request (base class.)
-        requests.exceptions.JSONDecodeError: If the response body is not valid JSON.
+        requests.RequestException derived error (e.g. ConnectionError, JSONDecodeError, HTTPError, etc.)
+        OSError derived error (e.g. file system errors, permission errors, etc.)
     """
     headers = {
         # https://learn.microsoft.com/en-us/graph/outlook-immutable-id
@@ -738,6 +739,10 @@ def _list_attachments(
 
     Returns:
         list[GraphAttachmentT]
+
+    Raises:
+        requests.RequestException derived error (e.g. ConnectionError, JSONDecodeError, HTTPError, etc.)
+        OSError derived error (e.g. file system errors, permission errors, etc.)
     """
     # Best I can tell, '/attachments' returns all attachments and has no 'nextLink'
     url = f"{GRAPH_API_URL}/me/messages/{message.get('id')}/attachments"
@@ -763,6 +768,10 @@ def _get_attachment_content(  # noqa: C901
 
     Returns:
         tuple[str, str]: Attachment content bytes and content type.
+
+    Raises:
+        requests.RequestException derived error (e.g. ConnectionError, JSONDecodeError, HTTPError, etc.)
+        OSError derived error (e.g. file system errors, permission errors, etc.)
     """
 
     def _warn_attachment(name: Path, errmsg: str, level: int = logging.WARNING) -> None:
@@ -861,6 +870,10 @@ def _save_attachment(  # noqa: PLR0913, PLR0917
 
     Returns:
         Path | None: Path to saved attachment or None if save failed for a non-fatal reason.
+
+    Raises:
+        requests.RequestException derived error (e.g. ConnectionError, JSONDecodeError, HTTPError, etc.)
+        OSError derived error (e.g. file system errors, permission errors, etc.)
     """
     content, content_type = _get_attachment_content(
         session,
@@ -918,6 +931,10 @@ def _save_attachments(  # noqa: PLR0913, PLR0917
 
     Returns:
         list[str]: Paths relative to vault or URIs (file://) for absolute paths.
+
+    Raises:
+        requests.RequestException derived error (e.g. ConnectionError, JSONDecodeError, HTTPError, etc.)
+        OSError derived error (e.g. file system errors, permission errors, etc.)
     """
 
     def _attachment_rel_links(abs_paths: list[Path], note_dir: Path, vault_dir: Path) -> list[str]:
@@ -985,6 +1002,10 @@ def _export_message(  # noqa: C901, PLR0912, PLR0915
         message (GraphMessageT): The message.
         export_opts (ExportOptions): Export options.
         export_stats (ExportStatsDict): Export statistics dictionary to update.
+
+    Raises:
+        requests.RequestException derived error (e.g. ConnectionError, JSONDecodeError, HTTPError, etc.)
+        OSError derived error (e.g. file system errors, permission errors, etc.)
     """
 
     def _fix_dates(message: GraphMessageT, is_draft: bool) -> None:  # noqa: FBT001
@@ -1192,7 +1213,8 @@ def _export_folder_batch(  # noqa: PLR0913, PLR0917
             Link to next batch of messages or None if there are no more batches]
 
     Raises:
-        requests.RequestException derived error.
+        requests.RequestException derived error (e.g. ConnectionError, JSONDecodeError, HTTPError, etc.)
+        OSError derived error (e.g. file system errors, permission errors, etc.)
     """
     data = first_batch_data or _list_messages(session, graph_config, url, params=params)
 
@@ -1246,8 +1268,8 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         None
 
     Raises:
-        requests.RequestException derived error.
-        OSError derived error.
+        requests.RequestException derived error (e.g. ConnectionError, JSONDecodeError, HTTPError, etc.)
+        OSError derived error (e.g. file system errors, permission errors, etc.)
     """
 
     def _mkdir(dir_path: Path, name: str, *, parents: bool = False, exist_ok: bool = True) -> None:
@@ -1257,7 +1279,7 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
                     dir_path.mkdir(parents=parents, exist_ok=exist_ok)
                 except OSError as err:
                     err_console.print(f"Failed to create {name} directory: {err}")
-                    raise typer.Exit(code=1) from err
+                    raise
 
                 logger.info("Created %s directory '%s'", name, dir_path)
             else:
@@ -1857,7 +1879,7 @@ def export(  # noqa: PLR0913, PLR0917
     except requests.RequestException as err:
         print_graph_request_exception(err)
         raise typer.Exit(code=1) from err
-    except AuthRequiredError as err:
+    except GraphAuthRequiredError as err:
         err_console.print(f"{err} {AUTH_ERROR_USECOMMAND}")
         raise typer.Exit(code=1) from err
     except (GraphApiError, ValueError, OSError) as err:

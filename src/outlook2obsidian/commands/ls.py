@@ -9,9 +9,9 @@ from requests import sessions
 
 from outlook2obsidian.shared import (
     AUTH_ERROR_USECOMMAND,
-    AuthRequiredError,
     CommandContext,
     GraphApiError,
+    GraphAuthRequiredError,
     console,
     err_console,
     get_graph_config,
@@ -68,7 +68,7 @@ def ls(
     except requests.RequestException as err:
         print_graph_request_exception(err)
         raise typer.Exit(code=1) from err
-    except AuthRequiredError as err:
+    except GraphAuthRequiredError as err:
         err_console.print(f"{err} {AUTH_ERROR_USECOMMAND}")
         raise typer.Exit(code=1) from err
     except (GraphApiError, ValueError, OSError) as err:

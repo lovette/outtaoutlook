@@ -184,6 +184,10 @@ class GraphFolderNotFoundError(GraphApiError):
     """Raised when a folder path cannot be found in the Graph API."""
 
 
+class GraphAuthRequiredError(GraphApiError):
+    """Raised when user authentication is required."""
+
+
 @dataclass
 class CachedAccessTokenInfo:
     """Relevant details from SerializableTokenCache."""
@@ -204,10 +208,6 @@ class GraphApiConfig:
     cache_dir: Path | None
     cache_enabled: bool
     token_info: CachedAccessTokenInfo
-
-
-class AuthRequiredError(ValueError):
-    """Raised when user authentication is required."""
 
 
 @dataclass
@@ -332,22 +332,22 @@ def get_graph_config(common_opts: CommonCommandOptions) -> GraphApiConfig:
         GraphApiConfig: Graph API configuration.
 
     Raises:
-        AuthRequiredError: Raised if access token is missing or invalid.
-        ValueError: MSAL-related error, such as an invalid MSAL environment or invalid token cache.
+        GraphAuthRequiredError: Raised if access token is missing or invalid.
+        GraphApiError: MSAL-related error, such as an invalid MSAL environment or invalid token cache.
     """
     if not common_opts.auth_file_path:
         errmsg = "Internal error: Authentication file path is not set."
-        raise ValueError(errmsg)
+        raise GraphApiError(errmsg)
 
     # First see if there is cached authentication information.
     token_info = get_token_cache_info(common_opts.auth_file_path)
     if not token_info:
-        raise AuthRequiredError(AUTH_REQUIRED_ERROR)
+        raise GraphAuthRequiredError(AUTH_REQUIRED_ERROR)
 
     # Try to acquire a valid access token using cached credentials.
     _, _, _, token = get_graph_client(common_opts.auth_file_path, use_cache=True)
     if not token or "access_token" not in token:
-        raise AuthRequiredError(AUTH_EXPIRED_ERROR)
+        raise GraphAuthRequiredError(AUTH_EXPIRED_ERROR)
 
     return GraphApiConfig(
         access_token=token["access_token"],
@@ -387,8 +387,8 @@ def get_graph_client(  # noqa: C901, PLR0912
         tuple[msal.PublicClientApplication, msal.SerializableTokenCache, GraphAccountT | None, GraphAccessTokenT | None]
 
     Raises:
-        AuthRequiredError: Cache is being used and access token is unavailable or invalid.
-        ValueError: MSAL-related error, such as an invalid MSAL environment or invalid token cache.
+        GraphAuthRequiredError: Cache is being used and access token is unavailable or invalid.
+        GraphApiError: MSAL-related error, such as an invalid MSAL environment or invalid token cache.
     """
     account = None
     token = None
@@ -416,8 +416,8 @@ def get_graph_client(  # noqa: C901, PLR0912
 
     if not (client and tenant):
         if cache_info:
-            raise AuthRequiredError(AUTH_EXPIRED_ERROR)
-        raise AuthRequiredError(AUTH_REQUIRED_ERROR)
+            raise GraphAuthRequiredError(AUTH_EXPIRED_ERROR)
+        raise GraphAuthRequiredError(AUTH_REQUIRED_ERROR)
 
     app = msal.PublicClientApplication(
         client_id=client,
@@ -443,11 +443,11 @@ def get_graph_client(  # noqa: C901, PLR0912
                 )
 
         if not token:
-            raise AuthRequiredError(AUTH_EXPIRED_ERROR)
+            raise GraphAuthRequiredError(AUTH_EXPIRED_ERROR)
 
         if "access_token" not in token:
             errmsg = "Graph API returned an access token that does not have an 'access_token' property."
-            raise ValueError(errmsg)
+            raise GraphApiError(errmsg)
 
         # Sanity check GraphAccessTokenT fields
         missing_fields = GRAPH_ACCESS_TOKEN_FIELDS_SET - set(token.keys())
@@ -480,11 +480,8 @@ def graph_get_resource(  # noqa: C901
         GraphApiReturnT: JSON response from the Microsoft Graph API.
 
     Raises:
-        requests.ConnectionError: If there is a network-related error during the HTTP request.
-        requests.Timeout: If the HTTP request times out.
-        requests.HTTPError: If the HTTP request to the Microsoft Graph API fails.
-        requests.RequestException: For other errors during the HTTP request (base class.)
-        requests.exceptions.JSONDecodeError: If the response body is not valid JSON.
+        requests.RequestException derived error (e.g. ConnectionError, JSONDecodeError, HTTPError, etc.)
+        OSError derived error (e.g. file system errors, permission errors, etc.)
     """
 
     def _get_cache_file_path_and_header() -> tuple[Path | None, dict[str, Any]]:
@@ -608,7 +605,8 @@ def graph_get_mailbox_root(
         GraphFolderT
 
     Raises:
-        requests.RequestException derived error.
+        requests.RequestException derived error (e.g. ConnectionError, JSONDecodeError, HTTPError, etc.)
+        OSError derived error (e.g. file system errors, permission errors, etc.)
         GraphEmptyRootFolderError: Root information store cannot be retrieved.
     """
     url = f"{GRAPH_API_URL}/me/mailFolders/msgfolderroot"
@@ -640,7 +638,8 @@ def graph_enum_folders(
         dict[str, GraphFolderT]: A dictionary mapping folder names (lower cased) to folder properties.
 
     Raises:
-        requests.RequestException derived error.
+        requests.RequestException derived error (e.g. ConnectionError, JSONDecodeError, HTTPError, etc.)
+        OSError derived error (e.g. file system errors, permission errors, etc.)
         GraphEmptyRootFolderError: If the root information store of the mailbox cannot be retrieved.
     """
     folders: dict[str, GraphFolderT] = {}
@@ -705,7 +704,8 @@ def graph_get_folder_by_id(
         GraphFolderT | None: The folder object if found, otherwise None.
 
     Raises:
-        requests.RequestException derived error.
+        requests.RequestException derived error (e.g. ConnectionError, JSONDecodeError, HTTPError, etc.)
+        OSError derived error (e.g. file system errors, permission errors, etc.)
     """
     folder = None
     url = f"{GRAPH_API_URL}/me/mailFolders/{folder_id}"
@@ -738,7 +738,7 @@ def graph_get_folder_by_path(
         GraphFolderT: The folder object.
 
     Raises:
-        requests.RequestException derived error.
+        requests.RequestException derived error (e.g. ConnectionError, JSONDecodeError, HTTPError, etc.)
         GraphEmptyRootFolderError: If the root information store of the mailbox cannot be retrieved.
         GraphFolderNotFoundError: Raised if any of the specified folder paths cannot be resolved.
     """
@@ -806,7 +806,8 @@ def graph_walk_folders(
         list[GraphFolderT]: List of folder objects.
 
     Raises:
-        requests.RequestException derived error.
+        requests.RequestException derived error (e.g. ConnectionError, JSONDecodeError, HTTPError, etc.)
+        OSError derived error (e.g. file system errors, permission errors, etc.)
     """
 
     def _recurse_subfolder(folder: GraphFolderT, folders_by_id: dict[str, GraphFolderT], depth: int) -> None:
@@ -845,7 +846,8 @@ def graph_walk_mailbox(
         list[GraphFolderT]: List of folder objects.
 
     Raises:
-        requests.RequestException derived error.
+        requests.RequestException derived error (e.g. ConnectionError, JSONDecodeError, HTTPError, etc.)
+        OSError derived error (e.g. file system errors, permission errors, etc.)
         GraphEmptyRootFolderError: If the root information store of the mailbox cannot be retrieved.
     """
     root_folders = graph_enum_folders(session, graph_config, MAILBOX_ROOT)
@@ -871,7 +873,8 @@ def graph_resolve_folder_paths(
         list[GraphFolderT]: List of resolved folder objects, including subfolders if requested.
 
     Raises:
-        requests.RequestException derived error.
+        requests.RequestException derived error (e.g. ConnectionError, JSONDecodeError, HTTPError, etc.)
+        OSError derived error (e.g. file system errors, permission errors, etc.)
         GraphFolderNotFoundError: Raised if any of the specified folder paths cannot be resolved.
         GraphEmptyRootFolderError: If the root information store of the mailbox cannot be retrieved.
     """

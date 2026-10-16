@@ -12,8 +12,9 @@ from outlook2obsidian.shared import (
     AUTH_ERROR_USECOMMAND,
     AUTH_NO_CACHE_ERROR,
     GRAPH_SCOPES,
-    AuthRequiredError,
     CommandContext,
+    GraphApiError,
+    GraphAuthRequiredError,
     console,
     err_console,
     get_graph_client,
@@ -32,21 +33,21 @@ logger = logging.getLogger(APP_NAME)  # initialized in __main__
 
 
 def _raise_if_error(errmsg: str, result: dict | None) -> None:
-    """Raise a ValueError if the result dictionary contains an error or is None.
+    """Raise a GraphApiError if the result dictionary contains an error or is None.
 
     Args:
         errmsg (str): The error message to include if an error is raised.
         result (dict | None): The result dictionary to check for errors.
 
     Raises:
-        ValueError
+        GraphApiError
     """
     if not result:
-        raise ValueError(errmsg)
+        raise GraphApiError(errmsg)
 
     if "error" in result:
         errmsg = f"{errmsg}: {result.get('error')}; {result.get('error_description')}"
-        raise ValueError(errmsg)
+        raise GraphApiError(errmsg)
 
 
 def _auth_info(auth_file_path: Path) -> None:
@@ -59,7 +60,7 @@ def _auth_info(auth_file_path: Path) -> None:
     # If cache exists, see if cached tokens are valid.
     try:
         get_graph_client(auth_file_path, use_cache=True)
-    except AuthRequiredError as err:
+    except GraphAuthRequiredError as err:
         console.print(err)
         raise typer.Exit from err
 
@@ -169,10 +170,10 @@ def auth(
         except requests.RequestException as err:
             err_console.print(f"Error: {err}")
             raise typer.Exit(code=1) from err
-        except AuthRequiredError as err:
+        except GraphAuthRequiredError as err:
             err_console.print(f"{err} {AUTH_ERROR_USECOMMAND}")
             raise typer.Exit(code=1) from err
-        except ValueError as err:
+        except GraphApiError as err:
             err_console.print(f"Error: {err}")
             raise typer.Exit(code=1) from err
     else:
@@ -181,9 +182,9 @@ def auth(
         except requests.RequestException as err:
             err_console.print(f"Error: {err}")
             raise typer.Exit(code=1) from err
-        except AuthRequiredError as err:
+        except GraphAuthRequiredError as err:
             err_console.print(f"{err}")
             raise typer.Exit(code=1) from err
-        except ValueError as err:
+        except GraphApiError as err:
             err_console.print(f"Error: {err}")
             raise typer.Exit(code=1) from err
