@@ -38,12 +38,51 @@ VERBOSE_LOGGING_LEVELS = (
     logging.DEBUG,  # -vvv
 )
 
-LOGGING_FORMAT = "[%(levelname)s] %(message)s"
+VERBOSE_LOGGING_FORMATS = {
+    logging.ERROR: "[{levelname}] {message}",
+    logging.WARNING: "[{levelname}] {message}",
+    logging.INFO: "[{levelname}] {message}",
+    logging.DEBUG: "[{asctime}.{msecs:03.0f} {levelname} {threadName}] {message}",
+}
 
-logging.basicConfig(level=VERBOSE_LOGGING_LEVELS[0], format=LOGGING_FORMAT)
+LOGGING_DATE_FORMAT = "%H:%M:%S"
+LOGGING_DATE_STYLE = "{"
+
+logging.basicConfig(
+    level=VERBOSE_LOGGING_LEVELS[0],
+    format=VERBOSE_LOGGING_FORMATS[logging.ERROR],
+    datefmt=LOGGING_DATE_FORMAT,
+    style=LOGGING_DATE_STYLE,
+)
 
 # Use a named logger instead of root logger
 logger = logging.getLogger(APP_NAME)
+
+
+def _setup_logging(verbose: int) -> None:
+    """Setup logging based on verbosity level.
+
+    Args:
+        verbose (int): Verbosity level (0=error, 1=warning, 2=info, 3=debug).
+    """
+    logger.setLevel(VERBOSE_LOGGING_LEVELS[min(verbose, len(VERBOSE_LOGGING_LEVELS) - 1)])
+
+    if logger.getEffectiveLevel() == logging.DEBUG:
+        # 'requests' relies on urllib3 under the hood.
+        # Setting the urllib3 logger to DEBUG will capture connection attempts,
+        # pool activity, and basic request URLs.
+        urllib3_logger = logging.getLogger("urllib3")
+        urllib3_logger.setLevel(logging.DEBUG)
+
+    # Set logger format based on the effective logging level
+    logger_format = logging.Formatter(
+        fmt=VERBOSE_LOGGING_FORMATS[logger.getEffectiveLevel()],
+        datefmt=LOGGING_DATE_FORMAT,
+        style=LOGGING_DATE_STYLE,
+    )
+
+    for handler in logging.getLogger().handlers:
+        handler.setFormatter(logger_format)
 
 
 ######################################################################
@@ -339,16 +378,8 @@ def main(  # noqa: PLR0913, PLR0917
     ctx.ensure_object(CommandContext)
     ctx_obj: CommandContext = ctx.obj
 
-    # Adjust logging level
-    loglevel = VERBOSE_LOGGING_LEVELS[min(verbose, len(VERBOSE_LOGGING_LEVELS) - 1)]
-    logger.setLevel(loglevel)
-
-    if logger.getEffectiveLevel() == logging.DEBUG:
-        # 'requests' relies on urllib3 under the hood.
-        # Setting the urllib3 logger to DEBUG will capture connection attempts,
-        # pool activity, and basic request URLs.
-        urllib3_logger = logging.getLogger("urllib3")
-        urllib3_logger.setLevel(logging.DEBUG)
+    # Turn verbosity into a log level.
+    _setup_logging(verbose)
 
     config_file_path = ctx_obj.config_file_path
     cache_dir_abs = cache_dir.absolute() if cache_dir else Path.cwd()
