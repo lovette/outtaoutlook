@@ -66,7 +66,7 @@ def ls(
             )
 
     except requests.RequestException as err:
-        print_graph_request_exception(err)
+        print_graph_request_exception(console, err)
         raise typer.Exit(code=1) from err
     except GraphAuthRequiredError as err:
         err_console.print(f"{err} {AUTH_ERROR_USECOMMAND}")

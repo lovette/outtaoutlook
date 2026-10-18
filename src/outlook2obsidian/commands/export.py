@@ -2,6 +2,7 @@
 
 import base64
 import binascii
+import concurrent.futures
 import copy
 import json
 import logging
@@ -10,16 +11,18 @@ import os
 import re
 import sys
 import textwrap
+import threading
 import unicodedata
+from collections import defaultdict
 from collections.abc import Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
 from types import UnionType
-from typing import TYPE_CHECKING, Annotated, Any, get_args
+from typing import TYPE_CHECKING, Annotated, Any, Self, TypedDict, get_args
 from urllib.parse import unquote
 
 import requests
@@ -28,7 +31,8 @@ import yaml
 from html_to_markdown import ConversionOptions
 from html_to_markdown import convert as convert_to_markdown
 from requests import sessions
-from rich.progress import BarColumn, Progress, TaskID, TaskProgressColumn
+from rich.progress import BarColumn, Progress, ProgressColumn, SpinnerColumn, Task, TaskID, TextColumn
+from rich.text import Text
 
 from outlook2obsidian.shared import (
     APP_NAME,
@@ -64,6 +68,25 @@ if TYPE_CHECKING:
 app = typer.Typer(add_completion=False)
 logger = logging.getLogger(APP_NAME)  # initialized in __main__
 
+# There is a gap of time between a unique path name being generated
+# and the file is actually created on disk.
+# Therefore we need a way to reserve unique paths that is coordinated between all threads.
+# We do this by keeping a set of unique paths and a lock to coordinate access.
+# dict[path.parent]=(set(path.name), lock)
+unique_out_path_locks: dict[Path, tuple[set[str], threading.Lock]] = defaultdict(lambda: (set(), threading.Lock()))
+
+# Thread-local storage for per-thread data.
+thread_local_data = threading.local()
+
+# Each thread is assigned a unique counter ID to track its order of execution.
+thread_id_counter_lock = threading.Lock()
+thread_id_counter = 0
+
+# Keep track of whether the first thread spawned has received its first batch of messages.
+first_batch_complete_event = threading.Event()
+
+# Any worker can signal for all other workers to abort.
+abort_workers_event = threading.Event()
 
 ######################################################################
 # Constants
@@ -72,6 +95,7 @@ TITLE_UNTITLED = "Untitled"
 TITLE_MAXLEN = 255 - 25  # macOS limit minus a few characters for whatever `_unique_out_path` tacks on
 MIN_PROGRESS_THRESHOLD = 10  # Hide progress if only a few messages
 EXPORT_FOLDER_MSGFOLDERROOT = "msgfolderroot"
+FIRST_BATCH_COMPLETE_EVENT_WAIT = 60  # seconds; just a failsafe, I don't expect there to be any deadlocking :)
 
 ATTACHMENT_DEFAULT_SUFFIX = ".bin"
 ATTACHMENT_DEFAULT_NAME = "unnamed"  # suffix will be guessed
@@ -173,14 +197,17 @@ class ExportOptions:
 
     attachments_folder: str | Path  # `ATTACHMENTS_FOLDER_*`, folder name or absolute path.
     attachments_mkdir: bool  # Create mail folder hierarchy in attachments directory.
+    batch_size: int  # Number of messages to process in a batch.
     dry_run: bool  # Whether to perform a dry run without making any changes.
     filter_query: str | None  # --filter criteria from command line and config file.
     filter_test: bool  # Whether to perform a filter test without exporting.
+    manifest_dir: Path | None  # Directory to write the manifest file.
     mkdir_maxdepth: int | None  # Maximum depth (from the leaf) of folder tree to create when creating mail folder hierarchy.
     note_body_tags: list[str] | None  # --body-tag tags from command line and config file.
     note_metaprop: NoteMetaPropT | None  # --metaprop properties from command line and config file.
     note_tags: list[str] | None  # --tag tags from command line and config file.
     notes_dir: Path  # Directory to save notes (set internally.)
+    notes_limit: int  # Maximum number of notes to export (per folder).
     notes_mkdir: bool  # Create mail folder hierarchy in notes directory.
     place_tags_body_end: bool  # True to place body tags at the end of the note instead the top.
     place_tags_frontmatter: bool  # True to place non-body tags in frontmatter.
@@ -190,6 +217,28 @@ class ExportOptions:
 
 
 ExportStatsT = dict[ExportStat, int]
+
+
+@dataclass
+class ExportResult:
+    """Results of folder export."""
+
+    aborted: bool = False  # Whether the export was aborted.
+    messages: defaultdict[int, list[str]] = field(default_factory=lambda: defaultdict(list))  # {level:[message]}
+    exported_total_count: int | None = None  # Number of messages successfully exported.
+    stats: ExportStatsT | None = None  # Export statistics keyed by ExportStat.
+
+
+class RemainingItemsColumn(ProgressColumn):
+    """Renders remaining count/total, e.g. ' 90/100 remaining'."""
+
+    def render(self: Self, task: Task) -> Text:  # noqa: D102
+        # Prevent math bugs if total isn't set yet
+        total = int(task.total) if task.total is not None else "--"
+        remaining = int(task.remaining) if task.remaining is not None else "--"
+
+        return Text(f"{remaining}/{total}", style="progress.remaining")
+
 
 ######################################################################
 # Helpers
@@ -387,28 +436,40 @@ def _unique_out_path(p: Path, date_hint: datetime | None = None) -> Path:
     Returns:
         Path: Unique path with a non-conflicting file name.
     """
-    n = 1
-    max_paths = 10000
-    unique_path = p
+
+    def _get_unique_path(p_base: Path) -> Path | None:
+        n = 1
+        unique_path = p_base
+
+        while n < max_paths:
+            exists = (unique_path.name in path_names_set) or unique_path.exists()
+            path_names_set.add(unique_path.name)
+            if not exists:
+                return unique_path
+            unique_path = p_base.with_stem(f"{p_base.stem} ({n})")
+            n += 1
+
+        return None
 
     # Keep in mind we need to keep the final filename within TITLE_MAXLEN characters.
 
-    while unique_path.exists() and n < max_paths:
-        unique_path = p.with_stem(f"{p.stem} ({n})")
-        n += 1
+    max_paths = 10000
+    path_names_set, path_names_lock = unique_out_path_locks[p.parent]
 
-    if n == max_paths and date_hint:
+    with path_names_lock:
+        unique_path = _get_unique_path(p)
+        if unique_path:
+            return unique_path
+
+    if date_hint:
         # Try using the date hint to create a unique filename.
-        n = 1
-        unique_path = p.with_stem(f"{p.stem} {date_hint:%Y%m%d%H%M%S}")
-        while unique_path.exists() and n < max_paths:
-            unique_path = p.with_stem(f"{p.stem} {date_hint:%Y%m%d%H%M%S} ({n})")
-        n += 1
+        p = p.with_stem(f"{p.stem} {date_hint:%Y%m%d%H%M%S}")
+        with path_names_lock:
+            unique_path = _get_unique_path(p)
+            if unique_path:
+                return unique_path
 
-    if not unique_path.exists():
-        return unique_path
-
-    errmsg = f"{n} copies of '{p}' already exist?!"
+    errmsg = f"{max_paths} copies of '{p}' already exist?!"
     raise ExportError(errmsg)
 
 
@@ -800,11 +861,19 @@ def _get_attachment_content(  # noqa: C901
 
         if item_data_type == "#microsoft.graph.message":
             if content_type != "text/plain":
-                _warn_attachment(name, f"Content type for '{item_data_type}' is '{content_type}', expected 'text/plain'")
+                _warn_attachment(
+                    name,
+                    f"Content type for '{item_data_type}' is '{content_type}', expected 'text/plain'",
+                    logging.DEBUG,
+                )
             content_type = "message/rfc822"  # guess_extension() -> '.eml'
         elif item_data_type == "#microsoft.graph.contact":
             if not content_type or not content_type.endswith("vcard"):
-                _warn_attachment(name, f"Content type for '{item_data_type}' is '{content_type}', expected 'text/vcard'")
+                _warn_attachment(
+                    name,
+                    f"Content type for '{item_data_type}' is '{content_type}', expected 'text/vcard'",
+                    logging.DEBUG,
+                )
             content_type = "text/x-vcard"  # guess_extension() -> '.vcf'
         else:
             _warn_attachment(name, f"Unsupported item data type '{item_data_type}'")
@@ -1012,22 +1081,22 @@ def _export_message(  # noqa: C901, PLR0912, PLR0915
     def _fix_dates(message: GraphMessageT, is_draft: bool) -> None:  # noqa: FBT001
         dt_now = datetime_now()
 
-        for field in ("createdDateTime", "lastModifiedDateTime", "receivedDateTime", "sentDateTime"):
-            value = message.get(field)
+        for date_field in ("createdDateTime", "lastModifiedDateTime", "receivedDateTime", "sentDateTime"):
+            value = message.get(date_field)
             dt = _coerce_datetime(value)
 
             if not dt:
-                if field not in message:
-                    _log_message_notice(message, f"field({field}): missing date field")
-                elif is_draft and field in {"sentDateTime", "receivedDateTime"}:
+                if date_field not in message:
+                    _log_message_notice(message, f"field({date_field}): missing date field")
+                elif is_draft and date_field in {"sentDateTime", "receivedDateTime"}:
                     pass  # Drafts aren't expected to have sent or received dates, we'll set something below
                 elif value:
-                    _log_message_notice(message, f"field({field}): unexpected date format: '{value}'")
+                    _log_message_notice(message, f"field({date_field}): unexpected date format: '{value}'")
                 else:
-                    _log_message_notice(message, f"field({field}): no value")
+                    _log_message_notice(message, f"field({date_field}): no value")
 
             # Ensure all fields are set to a valid datetime
-            message[field] = dt or dt_now
+            message[date_field] = dt or dt_now
 
         # Outlook does crazy things with dates, so we do our best to help them make some kind of sense.
 
@@ -1185,10 +1254,10 @@ def _export_folder_batch(  # noqa: PLR0913, PLR0917
     session: sessions.Session,
     graph_config: GraphApiConfig,
     progress: Progress,
-    progress_task: TaskID,
+    progress_task_id: TaskID,
     first_batch_data: GraphApiReturnT | None,
     url: str,
-    params: dict[str, Any] | None,
+    params: dict[str, str | int] | None,
     batch_limit: int,
     exported_ids: set[str],
     export_opts: ExportOptions,
@@ -1200,10 +1269,10 @@ def _export_folder_batch(  # noqa: PLR0913, PLR0917
         session (sessions.Session): The requests session to pool requests.
         graph_config (GraphApiConfig): Graph API configuration.
         progress (rich.Progress): The progress bar to update during the export process.
-        progress_task (TaskID): The task ID for updating the progress bar.
+        progress_task_id (TaskID): The task ID for updating the progress bar.
         first_batch_data (GraphApiReturnT | None): First batch of messages or None to query `url`.
         url (str): The URL for the API request.
-        params (dict[str, Any] | None): The query parameters for the API request.
+        params (dict[str, str | int] | None): The query parameters for the API request.
         batch_limit (int): The maximum number of messages to export in this batch.
         exported_ids (set[str]): The set of message IDs that have already been exported. Modified in-place.
         export_opts (ExportOptions): Options for exporting messages.
@@ -1217,10 +1286,14 @@ def _export_folder_batch(  # noqa: PLR0913, PLR0917
         requests.RequestException derived error (e.g. ConnectionError, JSONDecodeError, HTTPError, etc.)
         OSError derived error (e.g. file system errors, permission errors, etc.)
     """
+    progress.update(progress_task_id, status="fetching messages", refresh=True)
+
     data = first_batch_data or _list_messages(session, graph_config, url, params=params)
 
     messages = data.get("value", [])
     next_url = data.get("@odata.nextLink")
+
+    progress.update(progress_task_id, status="writing notes", refresh=True)
 
     for message in messages:
         if message["id"] not in exported_ids:
@@ -1236,7 +1309,7 @@ def _export_folder_batch(  # noqa: PLR0913, PLR0917
         else:
             _exportstat_incr(export_stats, ExportStat.STAT_SKIPPED_DUPLICATE)
 
-        progress.update(progress_task, advance=1)
+        progress.update(progress_task_id, advance=1)
 
         batch_limit -= 1
         if batch_limit <= 0:
@@ -1246,27 +1319,25 @@ def _export_folder_batch(  # noqa: PLR0913, PLR0917
 
 
 def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
-    session: sessions.Session,
-    graph_config: GraphApiConfig,
     folder: GraphFolderT,
-    export_limit: int,
-    batch_size: int,
-    manifest_dir: Path | None,
+    session: sessions.Session,
+    progress: Progress,
+    progress_task_id: TaskID,
+    graph_config: GraphApiConfig,
     export_opts: ExportOptions,
-) -> None:
+) -> ExportResult:
     """Export messages from a specific folder to the output directory.
 
     Args:
-        session (sessions.Session): The requests session to pool requests.
-        graph_config (GraphApiConfig): Graph API configuration.
         folder (GraphFolderT): The folder object to export messages from.
-        export_limit (int): The maximum number of messages to export. 0 to export all messages.
-        batch_size (int): The number of messages to export in each batch.
-        manifest_dir (Path|None): The directory to store the manifest file. If None, manifest is not used.
+        session (sessions.Session): The requests session to pool requests.
+        progress (Progress): The progress tracker for the export operation.
+        progress_task_id (TaskID): The task ID for the progress tracker.
+        graph_config (GraphApiConfig): Graph API configuration.
         export_opts (ExportOptions): Options for exporting messages.
 
     Returns:
-        None
+        ExportResult: The result of the export operation, including statistics and any filter test message.
 
     Raises:
         requests.RequestException derived error (e.g. ConnectionError, JSONDecodeError, HTTPError, etc.)
@@ -1279,7 +1350,7 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
                 try:
                     dir_path.mkdir(parents=parents, exist_ok=exist_ok)
                 except OSError as err:
-                    err_console.print(f"Failed to create {name} directory: {err}")
+                    progress.print(f"Failed to create {name} directory: {err}")
                     raise
 
                 logger.info("Created %s directory '%s'", name, dir_path)
@@ -1301,25 +1372,29 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
 
             logger.debug("Wrote export manifest: '%s'", manifest_file_path)
 
-    folder_message_count = folder["totalItemCount"]
+    def _emit_log(errmsg: str, level: int = logging.INFO) -> None:
+        logger.log(level, 'Folder("%s"): %s', folder["folderPath"], errmsg)
 
-    if not export_opts.filter_test:
-        console.print()
-        console.print(f"[bold]Exporting folder '{folder['folderPath']}':")
+    folder_message_count = folder["totalItemCount"]
+    export_result = ExportResult()
 
     if not folder_message_count:
-        console.print("Folder is empty")
-        return
+        progress.update(progress_task_id, total=0, completed=0, status="empty folder", visible=False)
+        export_result.messages[logging.INFO].append("Folder is empty")
+        return export_result
+
+    progress.update(progress_task_id, status="evaluating", refresh=True)
 
     manifest_ids: set[str] = set()
     manifest_file_name = get_hash_filename(folder["id"], "export_manifest", ".json")
-    manifest_file_path = (manifest_dir / manifest_file_name) if manifest_dir else None
+    manifest_file_path = (export_opts.manifest_dir / manifest_file_name) if export_opts.manifest_dir else None
 
     if manifest_file_path and manifest_file_path.is_file():
         logger.info("Loading export manifest: '%s'", manifest_file_path)
         manifest_data = json.loads(manifest_file_path.read_text())
         manifest_ids = set(manifest_data.get("messageImmutableIds", []))
 
+    export_limit = export_opts.notes_limit
     exported_total_count = len(manifest_ids)
     notes_dir = export_opts.notes_dir
     attachments_dir_path = Path(export_opts.attachments_folder)  # assume it's an absolute path to start
@@ -1353,11 +1428,11 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         )
 
     if not export_opts.filter_test:
-        console.print(f"Saving notes to '{notes_dir}'")
+        _emit_log(f"Saving notes to '{notes_dir}'")
         _mkdir(notes_dir, "notes", parents=export_opts.notes_mkdir)
 
         if export_opts.with_attachments:
-            console.print(f"Saving attachments to '{attachments_dir_path}'")
+            _emit_log(f"Saving attachments to '{attachments_dir_path}'")
             _mkdir(attachments_dir_path, "attachments", parents=attachments_mkdir)
 
     # Dynamic variables that can be referenced in tags and metadata properties.
@@ -1385,17 +1460,18 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         export_stats[ExportStat.STAT_ATTACHMENT_LINKED] = 0
 
     # https://learn.microsoft.com/en-us/graph/query-parameters
-    params = {
+    params: dict[str, str | int] | None = {
         "$count": "true",
-        "$top": batch_size,
         "$select": ",".join(sorted(EXPORT_MESSAGE_FIELDS)),
     }
 
     if export_opts.filter_query:
+        params["$top"] = 1  # We're only interested in the message $count
         params["$filter"] = export_opts.filter_query
         exported_total_count = 0  # Manifest can be used to find dups but we but can't "skip" ahead
 
     elif export_opts.search_query:
+        params["$top"] = 1  # We're only interested in the message $count
         params["$search"] = export_opts.search_query
         exported_total_count = 0  # Manifest can be used to find dups but we but can't "skip" ahead
 
@@ -1403,6 +1479,7 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         # The Graph API imposes rules when using $orderby and $filter together.
         # $search and $orderby cannot be used together.
         # Orderby multiple fields so order is more deterministic.
+        params["$top"] = export_opts.batch_size
         params["$orderby"] = "lastModifiedDateTime,internetMessageId,subject"
 
     if exported_total_count:
@@ -1426,11 +1503,20 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
 
         if field:
             # Try to be somewhat helpful
-            err_console.print(
-                f"Error: Failed to list messages in folder '{folder['folderPath']}', "
+            progress.print(
+                f"[red]Error: Failed to list messages in folder '{folder['folderPath']}', "
                 f"possibly due to '{field}' criteria syntax errors.",
             )
+
+            _emit_log("Aborting due to filter/search criteria error", logging.DEBUG)
+
+        # If the first batch query fails due to filter or search criteria,
+        # there's no reason for other workers to continue.
         raise
+
+    # Now that we know that the first batch of messages has been
+    # successfully retrieved, we can release the other workers.
+    _release_workers()
 
     first_batch_messages = first_batch_data.get("value", [])
 
@@ -1438,24 +1524,27 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
     export_message_count: int = first_batch_data.get("@odata.count") or len(first_batch_messages)
 
     if export_opts.filter_test:
-        if export_opts.filter_query:
-            msg = f"'{folder['folderPath']}': {export_message_count} messages"
-        else:
-            msg = f"'{folder['folderPath']}': {export_message_count} messages"
+        # Report the filtered message count next to task progress.
+        progress.update(
+            progress_task_id,
+            total=1,
+            completed=1,
+            status=f"{export_message_count} messages",
+        )
 
-        console.print(msg)
-        return
+        return export_result
 
     if not export_message_count:
         if export_opts.filter_query:
-            msg = "Folder contains no messages matching 'filter' criteria"
+            msg, level = "No messages match 'filter' criteria", logging.INFO
         elif export_opts.search_query:
-            msg = "Folder contains no messages matching 'search' criteria"
+            msg, level = "No messages match 'search' criteria", logging.INFO
         else:
-            msg = f"Folder contains {folder_message_count} messages but Graph API result was empty"
+            msg, level = f"Contains {folder_message_count} messages but Graph API result was empty", logging.ERROR
 
-        console.print(msg)
-        return
+        export_result.messages[level].append(msg)
+
+        return export_result
 
     if not export_limit:
         export_limit = export_message_count
@@ -1469,37 +1558,33 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
     else:
         status_message.append(f"{export_limit} of {export_message_count}")
 
-    status_message.append(f"messages from folder '{folder['folderPath']}'...")
+    status_message.append("messages")
 
     if manifest_file_path:
         status_message.append("(skipping dups)")
     if export_opts.dry_run:
         status_message.append("(dry run)")
 
-    console.print(" ".join(status_message))
+    _emit_log(" ".join(status_message))
 
-    # No need to show progress for a small number of messages.
-    disable_progress = export_limit < MIN_PROGRESS_THRESHOLD
+    progress.update(
+        progress_task_id,
+        total=min(export_limit, export_message_count),
+        completed=exported_total_count,
+    )
 
-    with _logger_friendly_progress(
-        *[BarColumn(), TaskProgressColumn()],
-        console=console,
-        disable=disable_progress,
-        logger=logger,
-    ) as progress:
-        progress_task = progress.add_task("", total=export_limit, completed=exported_total_count)
-
+    if True:
         while next_url is not None and exported_total_count < export_limit:
             try:
                 batch_total, next_url = _export_folder_batch(
                     session,
                     graph_config,
                     progress,
-                    progress_task,
+                    progress_task_id,
                     first_batch_data,
                     next_url,
                     params,
-                    min(batch_size, export_limit - exported_total_count),
+                    min(export_opts.batch_size, export_limit - exported_total_count),
                     manifest_ids,
                     export_opts,
                     export_stats,
@@ -1518,9 +1603,12 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
             params = None  # included in 'nextLink' automatically
             first_batch_data = None
 
-    console.print("Folder results:")
-    for stat, stat_count in export_stats.items():
-        console.print(f"- {stat}: {stat_count}")
+    progress.update(progress_task_id, status="done")
+
+    export_result.exported_total_count = exported_total_count
+    export_result.stats = export_stats
+
+    return export_result
 
 
 def _build_filter_query(
@@ -1559,22 +1647,12 @@ def _build_filter_query(
             else f" {filter_cond.value.lower()} ".join(_quote_paren(f) for f in message_filters)
         )
 
-        if filter_test:
-            console.print(f"Filter criteria: {filter_query}")
-        else:
-            logger.debug("Filter criteria: %s", filter_query)
-
     if message_search:
         search_query = _quote_search(
             message_search[0]
             if len(message_search) == 1
             else f" {search_cond.value.upper()} ".join(_quote_paren(s) for s in message_search),
         )
-
-        if filter_test:
-            console.print(f"Search criteria: {search_query}")
-        else:
-            logger.debug("Search criteria: %s", search_query)
 
     if filter_query and search_query:
         msg = "'filter' and 'search' criteria cannot be used together."
@@ -1587,12 +1665,293 @@ def _build_filter_query(
     return filter_query, search_query
 
 
+def _abort_workers() -> None:
+    """Set event that signals all workers to stop exporting messages."""
+    if not abort_workers_event.is_set():
+        logger.debug("Setting all workers abort flag")
+        abort_workers_event.set()
+
+
+def _release_workers() -> None:
+    if thread_local_data.thread_id == 1 and not first_batch_complete_event.is_set():
+        logger.debug("Releasing workers")
+        first_batch_complete_event.set()
+
+
+def _export_folder_worker(  # noqa: C901
+    folder: GraphFolderT,
+    *,
+    progress: Progress,
+    progress_task_id: TaskID,
+    graph_config: GraphApiConfig,
+    export_opts: ExportOptions,
+) -> ExportResult:
+    """Export folder worker thread entry point.
+
+    Args:
+        folder (GraphFolderT): Folder to export.
+        progress (Progress): Progress bar.
+        progress_task_id (TaskID): The task ID for the progress tracker.
+        graph_config (GraphApiConfig): Graph API configuration.
+        export_opts (ExportOptions): Options for exporting messages.
+
+    Raises:
+        Exceptions are not captured and will bubble up to the main thread by `future.result`.
+
+    Returns:
+        ExportResult: The result of the export operation, including statistics and any status message.
+    """
+
+    def _emit_log(errmsg: str, level: int = logging.INFO) -> None:
+        logger.log(level, 'Folder("%s"): %s', folder["folderPath"], errmsg)
+
+    def _get_thread_id() -> int:
+        global thread_id_counter  # noqa: PLW0603
+
+        if not getattr(thread_local_data, "thread_id", None):
+            with thread_id_counter_lock:
+                thread_id_counter += 1
+                thread_local_data.thread_id = thread_id_counter
+
+            new_name = f"Thread #{thread_local_data.thread_id}"
+            logger.debug("Setting thread name to '%s'", new_name)
+            threading.current_thread().name = new_name
+
+        return thread_local_data.thread_id
+
+    def _wait_first_batch_release() -> bool:
+        if thread_id > 1 and not first_batch_complete_event.is_set():
+            _emit_log("Waiting for first batch release", logging.DEBUG)
+
+            if not first_batch_complete_event.wait(timeout=FIRST_BATCH_COMPLETE_EVENT_WAIT):
+                _emit_log("Timed out waiting for release.", logging.DEBUG)
+                _abort_workers()
+                return False
+
+        return True
+
+    thread_id = _get_thread_id()
+
+    # Wait for the first batch to pass its checkpoint if this is not the primary thread.
+    if not _wait_first_batch_release():
+        return ExportResult(aborted=True)
+
+    # If one worker aborted, all the others abort too.
+    if abort_workers_event.is_set():
+        return ExportResult(aborted=True)
+
+    _emit_log("Working on this folder", logging.DEBUG)
+
+    # Reset task start time to get true elapsed time for this folder.
+    progress.reset(progress_task_id, start=True)
+
+    try:
+        with sessions.Session() as session:
+            return _export_folder(
+                folder,
+                session,
+                progress,
+                progress_task_id,
+                graph_config,
+                export_opts,
+            )
+    except requests.RequestException as err:
+        print_graph_request_exception(progress.console, err)
+        _emit_log("Encountered an exception.", logging.DEBUG)
+        _abort_workers()
+    except GraphAuthRequiredError as err:
+        # This should have triggered in main thread when calling `get_graph_config`...
+        logger.error("%s %s", str(err), AUTH_ERROR_USECOMMAND)  # noqa: TRY400
+        _emit_log("Encountered an exception.", logging.DEBUG)
+        _abort_workers()
+    except (GraphApiError, ValueError, OSError) as err:
+        logger.error("%s", str(err))  # noqa: TRY400
+        _emit_log("Encountered an exception.", logging.DEBUG)
+        _abort_workers()
+    finally:
+        # Primary thread must always release workers!
+        _release_workers()
+
+    return ExportResult(aborted=True)
+
+
+def _export_folders(  # noqa: C901, PLR0912, PLR0915
+    folders: list[GraphFolderT],
+    graph_config: GraphApiConfig,
+    export_opts: ExportOptions,
+    max_threads: int | None,
+) -> None:
+    """Export a list of folders, each in its own thread.
+
+    Args:
+        folders (list[GraphFolderT]): List of folder objects.
+        graph_config (GraphApiConfig): Graph API configuration.
+        export_opts (ExportOptions): Options for exporting messages.
+        max_threads (int or None): Maximum size of thread pool or None to decide based on hardware.
+    """
+
+    # Keyword arguments to `_export_folder_worker`.
+    class _WorkerArgs(TypedDict):
+        progress: Progress
+        progress_task_id: TaskID
+        graph_config: GraphApiConfig
+        export_opts: ExportOptions
+
+    show_progress = True
+
+    if export_opts.filter_test:
+        progress_cols = [
+            TextColumn("[bold]{task.description}"),
+            SpinnerColumn(finished_text=""),
+            TextColumn("{task.fields[status]}"),  # our custom field
+        ]
+    else:
+        progress_cols = [
+            TextColumn("{task.description}"),
+            BarColumn(),
+            SpinnerColumn(),
+            RemainingItemsColumn(),  # TextColumn("{task.remaining:g}"),
+            TextColumn("{task.fields[status]}"),  # our custom field
+        ]
+
+    with (
+        concurrent.futures.ThreadPoolExecutor(max_threads) as executor,
+        _logger_friendly_progress(*progress_cols, console=console, logger=logger, disable=not show_progress) as progress,
+    ):
+        export_results: dict[str, tuple[GraphFolderT, ExportResult | None]] = {}  # {id:(folder, result)}
+        folder_task_id: dict[str, tuple[GraphFolderT, TaskID]] = {}  # {id: (folder,task_id)}
+        workers: dict[concurrent.futures.Future[ExportResult], GraphFolderT] = {}
+        future_task_id: dict[concurrent.futures.Future[ExportResult], TaskID] = {}
+
+        logger.debug("Worker thread pool size: %d", executor._max_workers)  # noqa: SLF001
+
+        for folder in folders:
+            # Add tasks to progress bar *before* starting.
+            # This keeps the task bars in hierarchical order and ensures
+            # console output doesn't interrupt the progress display.
+            progress_task_id = progress.add_task(
+                f"\N{OPEN FILE FOLDER}{folder['folderPath']}",
+                start=False,
+                total=None,
+                visible=True,
+                status="pending",
+            )
+
+            worker_args: _WorkerArgs = {
+                "progress": progress,
+                "progress_task_id": progress_task_id,
+                "graph_config": graph_config,
+                "export_opts": export_opts,
+            }
+
+            future = executor.submit(_export_folder_worker, folder, **worker_args)
+
+            workers[future] = folder
+            future_task_id[future] = progress_task_id
+            folder_task_id[folder["id"]] = (folder, progress_task_id)
+            export_results[folder["id"]] = (folder, None)
+
+        shutdown_pending = False
+        progress_tasks: dict[TaskID, Task] = {}
+        progress_tasks = {task.id: task for task in progress.tasks}
+
+        # We loop through workers sequentially instead of using `as_completed` because it hangs after we call `shutdown` :/
+        # https://tiewkeehui.cc/blog/python-thread-pool-executor/
+        # https://stackoverflow.com/questions/66923690/does-concurrent-futures-as-completed-yield-for-cancelled-futures
+
+        logger.debug("Starting worker threads.")
+
+        # Start timer now so we can turn off the spinner if aborted.
+        for progress_task_id in progress.task_ids:
+            progress.start_task(progress_task_id)
+
+        for worker, folder in workers.items():
+            progress_task_id = future_task_id[worker]
+
+            if worker.cancelled():
+                logger.debug('Folder("%s"): Future was cancelled', folder["folderPath"])
+                progress.update(progress_task_id, status="Cancelled")
+                continue
+
+            worker_exception = False
+
+            try:
+                export_result = worker.result()
+            except concurrent.futures.CancelledError:
+                # This will never happen because we skip cancelled futures before calling result()
+                worker_exception = True
+            else:
+                export_results[folder["id"]] = (folder, export_result)
+
+                result_type = [
+                    "aborted" if export_result.aborted else None,
+                    "stats" if export_result.stats else None,
+                    "messages" if export_result.messages else None,
+                ]
+
+                logger.debug(
+                    'Folder("%s"): Worker result is available (%s)',
+                    folder["folderPath"],
+                    ",".join(filter(None, result_type)),
+                )
+
+                if export_result.aborted:
+                    task = progress_tasks[progress_task_id]
+                    progress.update(progress_task_id, completed=task.total, status="cancelled")
+
+            if worker_exception and not abort_workers_event.is_set():
+                logger.debug('Folder("%s"): Worker resulted in an exception.', folder["folderPath"])
+                _abort_workers()
+
+            if abort_workers_event.is_set() and not shutdown_pending:
+                # Cancel any workers that have not run yet
+                logger.debug('Folder("%s"): Abort signal is set, shutting down worker threads.', folder["folderPath"])
+                executor.shutdown(wait=False, cancel_futures=True)
+                shutdown_pending = True
+
+    logger.debug("All worker threads finished.")
+
+    # Output results
+    for folder_and_result in export_results.values():
+        folder, export_result = folder_and_result
+        if export_result and (export_result.messages or export_result.stats):
+            console.print()
+            console.print(f"[bold]'{folder['folderPath']}'[/bold]:")
+
+            for level, messages in export_result.messages.items():
+                for message in messages:
+                    if level == logging.ERROR:
+                        console.print(f"[red]- {message}[/red]")
+                    elif level == logging.WARNING:
+                        console.print(f"[yellow]- {message}[/yellow]")
+                    else:
+                        console.print(f"- {message}")
+
+            if export_result.stats:
+                for stat, stat_count in export_result.stats.items():
+                    console.print(f"- {stat}: {stat_count}")
+
+    if abort_workers_event.is_set():
+        raise typer.Exit(code=1)
+
+
 def _validate_config_file_collection(
     config_opt: str,
     collection: list[Any] | dict[str, Any],
     collection_type: type,
     item_type: type | UnionType,
 ) -> None:
+    """Validate types for a collection and its values.
+
+    Args:
+        config_opt (str): Configuration file option.
+        collection (list[Any] | dict[str, Any]): Collection to validate.
+        collection_type (type): Expected type of the collection (list or dict).
+        item_type (type | UnionType): Expected type(s) of the items in the collection.
+
+    Raises:
+        typer.BadParameter: Raised if the collection or any values are not of the expected type.
+    """
     if collection is not None:
         if not isinstance(collection, collection_type):
             errmsg = (
@@ -1629,7 +1988,7 @@ def _validate_config_file_collection(
 
 
 @app.command()
-def export(  # noqa: PLR0913, PLR0917
+def export(  # noqa: PLR0913, PLR0915, PLR0917
     ctx: typer.Context,
     folder_name: Annotated[
         list[str],
@@ -1807,6 +2166,13 @@ def export(  # noqa: PLR0913, PLR0917
             help="Number of messages to to fetch in each Graph API request.",
         ),
     ] = GRAPH_API_BATCH_MAX,
+    max_threads: Annotated[
+        int | None,
+        typer.Option(
+            min=1,
+            help="Maximum size of thread pool.",
+        ),
+    ] = None,
     dry_run: Annotated[  # noqa: FBT002
         bool,
         typer.Option(
@@ -1866,27 +2232,10 @@ def export(  # noqa: PLR0913, PLR0917
     try:
         graph_config = get_graph_config(common_opts)
 
-        export_opts = ExportOptions(
-            attachments_folder=attachments_folder,
-            attachments_mkdir=attachments_mkdir,
-            dry_run=dry_run,
-            filter_query=filter_query,
-            filter_test=filter_test,
-            mkdir_maxdepth=mkdir_maxdepth,
-            note_body_tags=note_body_tags or None,
-            note_metaprop=note_metaprop or None,
-            note_tags=note_tags or None,
-            notes_dir=vault_dir,
-            notes_mkdir=notes_mkdir,
-            place_tags_body_end=place_tags_body_end,
-            place_tags_frontmatter=place_tags_frontmatter,
-            search_query=search_query,
-            vault_dir=vault_dir,
-            with_attachments=with_attachments,
-        )
-
         # Are we exporting the entire mailbox?
         folder_is_msgfolderroot = EXPORT_FOLDER_MSGFOLDERROOT in {f.lower() for f in folder_name}
+
+        logger.debug("Resolving folder paths")
 
         with sessions.Session() as session:
             folders = graph_resolve_folder_paths(
@@ -1896,27 +2245,8 @@ def export(  # noqa: PLR0913, PLR0917
                 maxdepth=maxdepth,
             )
 
-        # Remove excluded folders
-        folders = [f for f in folders if f["displayName"].lower() not in not_folder_set]
-
-        if not filter_test:
-            logger.debug("Querying Graph API for %d messages at a time", batch_size)
-            console.print(f"Exporting messages from {len(folders)} folders...")
-
-        with sessions.Session() as session:
-            for folder in folders:
-                _export_folder(
-                    session,
-                    graph_config,
-                    folder,
-                    limit or 0,
-                    batch_size,
-                    common_opts.cache_dir if use_manifest else None,
-                    export_opts,
-                )
-
     except requests.RequestException as err:
-        print_graph_request_exception(err)
+        print_graph_request_exception(err_console, err)
         raise typer.Exit(code=1) from err
     except GraphAuthRequiredError as err:
         err_console.print(f"{err} {AUTH_ERROR_USECOMMAND}")
@@ -1924,3 +2254,52 @@ def export(  # noqa: PLR0913, PLR0917
     except (GraphApiError, ValueError, OSError) as err:
         err_console.print(f"Error: {err}")
         raise typer.Exit(code=1) from err
+
+    # Remove excluded folders
+    folders = [f for f in folders if f["folderPath"].lower() not in not_folder_set]
+    if not folders:
+        err_console.print("No folders selected to export.")
+        raise typer.Exit(code=1)
+
+    export_opts = ExportOptions(
+        attachments_folder=attachments_folder,
+        attachments_mkdir=attachments_mkdir,
+        batch_size=batch_size,
+        dry_run=dry_run,
+        filter_query=filter_query,
+        filter_test=filter_test,
+        manifest_dir=common_opts.cache_dir if use_manifest else None,
+        mkdir_maxdepth=mkdir_maxdepth,
+        note_body_tags=note_body_tags or None,
+        note_metaprop=note_metaprop or None,
+        note_tags=note_tags or None,
+        notes_dir=vault_dir,
+        notes_limit=limit or 0,
+        notes_mkdir=notes_mkdir,
+        place_tags_body_end=place_tags_body_end,
+        place_tags_frontmatter=place_tags_frontmatter,
+        search_query=search_query,
+        vault_dir=vault_dir,
+        with_attachments=with_attachments,
+    )
+
+    if filter_test:
+        if filter_query:
+            console.print(f"[bold]Testing filter criteria for {len(folders)} folders")
+        if search_query:
+            console.print(f"[bold]Testing search criteria for {len(folders)} folders")
+    else:
+        console.print(f"Exporting messages from {len(folders)} folders")
+        logger.debug("Querying Graph API for %d messages at a time", batch_size)
+
+    if filter_query:
+        console.print(f"Filter criteria: {filter_query}")
+    else:
+        logger.debug("Filter criteria: %s", filter_query)
+
+    if search_query:
+        console.print(f"Search criteria: {search_query}")
+    else:
+        logger.debug("Search criteria: %s", search_query)
+
+    _export_folders(folders, graph_config, export_opts, max_threads)

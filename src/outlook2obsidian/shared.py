@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import os
+import threading
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -241,6 +242,12 @@ class CommandContext:
 console = Console(soft_wrap=True)  # Enable soft wrap so newlines are not inserted to wrap lines wider than the terminal
 err_console = Console(stderr=True, soft_wrap=True, style="red", highlight=False)
 logger = logging.getLogger(APP_NAME)  # initialized in __main__
+
+
+# Graph API limits concurrent requests.
+# Requests will fail with 'MailboxConcurrency' error if limit is exceeded.
+GRAPH_API_CONCURRENT_LIMIT = 4
+graph_get_resource_lock = threading.Semaphore(GRAPH_API_CONCURRENT_LIMIT)
 
 
 ######################################################################
@@ -579,7 +586,8 @@ def graph_get_resource(  # noqa: C901
         if resp_json is not None:
             return resp_json
 
-    resp = session.send(req, timeout=30)
+    with graph_get_resource_lock:
+        resp = session.send(req, timeout=30)
 
     resp.raise_for_status()
 
@@ -906,10 +914,11 @@ def graph_resolve_folder_paths(
     return graph_walk_folders(session, graph_config, folders, maxdepth)
 
 
-def print_graph_request_exception(err: requests.RequestException) -> None:
+def print_graph_request_exception(console: Console, err: requests.RequestException) -> None:
     """Print error message resulting from a Graph API request exception.
 
     Args:
+        console (Console): The console to print messages to.
         err (requests.RequestException): The exception.
     """
     resp_error_code, resp_error_message = None, None
@@ -921,9 +930,9 @@ def print_graph_request_exception(err: requests.RequestException) -> None:
         resp_error_code, resp_error_message = resp_error.get("code"), resp_error.get("message")
 
     if resp_error_code and resp_error_message:
-        err_console.print(f"Error: {resp_error_message} [{resp_error_code}]; {err}")
+        console.print(f"[red]{resp_error_message} [{resp_error_code}]; {err}")
     else:
-        err_console.print(f"Error: {err}")
+        console.print(f"[red]{err}")
 
 
 def get_hash_filename(content: str, prefix: str, suffix: str) -> Path:
