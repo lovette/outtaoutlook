@@ -28,6 +28,7 @@ from requests import sessions
 from rich.progress import BarColumn, Progress, ProgressColumn, SpinnerColumn, Task, TaskID, TextColumn
 from rich.text import Text
 
+from outtaoutlook.output_eml import ExportFormatEml
 from outtaoutlook.output_html import ExportFormatHtml
 from outtaoutlook.output_json import ExportFormatJson
 from outtaoutlook.output_md import ExportFormatMarkdown
@@ -41,6 +42,7 @@ from outtaoutlook.shared import (
     MAILBOX_ROOT,
     TITLE_UNTITLED,
     CommandContext,
+    ExportFolderContext,
     ExportOptions,
     ExportStat,
     ExportStatsT,
@@ -73,6 +75,9 @@ if TYPE_CHECKING:
 
     from outtaoutlook.output_protocol import OutputFormatModule
 
+######################################################################
+# Global variables
+
 app = typer.Typer(add_completion=False)
 logger = logging.getLogger(APP_NAME)  # initialized in __main__
 
@@ -90,12 +95,14 @@ first_batch_complete_event = threading.Event()
 # Any worker can signal for all other workers to abort.
 abort_workers_event = threading.Event()
 
+
 ######################################################################
 # Constants
 
 MIN_PROGRESS_THRESHOLD = 10  # Hide progress if only a few messages
 FIRST_BATCH_COMPLETE_EVENT_WAIT = 60  # seconds; just a failsafe, I don't expect there to be any deadlocking :)
 FOLDER_ICON = "\N{OPEN FILE FOLDER}\N{NARROW NO-BREAK SPACE}"
+MAX_EXPORT_WORKERS = 32  # maximum ThreadPoolExecutor will use
 
 ATTACHMENT_DEFAULT_SUFFIX = ".bin"
 ATTACHMENT_DEFAULT_NAME = "unnamed"  # suffix will be guessed
@@ -121,24 +128,11 @@ MESSAGE_DATATYPE_EVENT_MESSAGE_SET = {
 # Simple detection if filter/search critera contain 'and' or 'or' conditions.
 RE_AND_OR = re.compile(r"\s(and|or)\s", re.IGNORECASE)
 
-# Message fields we reference for exporting
-EXPORT_MESSAGE_FIELDS = [
-    "body",
-    "createdDateTime",
-    "id",
-    "isDraft",
-    "lastModifiedDateTime",
-    "receivedDateTime",
-    "sentDateTime",
-    "subject",
-    "hasAttachments",
-]
-
 EXPECTED_MESSAGE_FIELDS_SET = GRAPH_MESSAGE_FIELDS_SET | {"@odata.etag"}
 MESSAGE_DATE_FIELDS = ["createdDateTime", "lastModifiedDateTime", "sentDateTime", "receivedDateTime"]
 
-
 EXPORT_MODULES: dict[OutputFormatChoice, type[OutputFormatModule]] = {
+    OutputFormatChoice.eml: ExportFormatEml,
     OutputFormatChoice.md: ExportFormatMarkdown,
     OutputFormatChoice.html: ExportFormatHtml,
     OutputFormatChoice.json: ExportFormatJson,
@@ -671,7 +665,7 @@ def _save_attachments(  # noqa: PLR0913, PLR0917
     return attachment_paths
 
 
-def _export_message(  # noqa: PLR0913, PLR0917
+def _export_message(  # noqa: C901, PLR0913, PLR0917
     session: sessions.Session,
     graph_config: GraphApiConfig,
     message: GraphMessageT,
@@ -733,6 +727,7 @@ def _export_message(  # noqa: PLR0913, PLR0917
             message["receivedDateTime"],
         )
 
+    message_id: str | None = message.get("id")
     subject: str = message.get("subject") or TITLE_UNTITLED
     title = safe_file_name(subject, TITLE_UNTITLED)
     is_draft: bool | None = message.get("isDraft")
@@ -740,6 +735,11 @@ def _export_message(  # noqa: PLR0913, PLR0917
     data_type: str | None = message.get("@odata.type")
     is_calendar_related = data_type and data_type in MESSAGE_DATATYPE_EVENT_MESSAGE_SET
     attachment_paths: list[Path] | None = None
+
+    if not message_id:
+        # I don't expect this to ever happen, but just in case.
+        log_message_notice(message, "'id' field is not set!", logging.ERROR)
+        return
 
     _fix_dates(message, bool(is_draft))
 
@@ -854,25 +854,15 @@ def _export_folder_batch(  # noqa: PLR0913, PLR0917
     return len(messages), next_url
 
 
-def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
-    folder: GraphFolderT,
-    session: sessions.Session,
-    progress: Progress,
-    progress_task_id: TaskID,
-    graph_config: GraphApiConfig,
+def _export_folder(  # noqa: C901, PLR0912, PLR0915
+    export_context: ExportFolderContext,
     output_module: OutputFormatModule,
-    export_opts: ExportOptions,
 ) -> ExportResult:
     """Export messages from a specific folder to the output directory.
 
     Args:
-        folder (GraphFolderT): The folder object to export messages from.
-        session (sessions.Session): The requests session to pool requests.
-        progress (Progress): The progress tracker for the export operation.
-        progress_task_id (TaskID): The task ID for the progress tracker.
-        graph_config (GraphApiConfig): Graph API configuration.
+        export_context (ExportFolderContext): Context for the folder being exported.
         output_module (OutputFormatModule): The output module to use for exporting.
-        export_opts (ExportOptions): Options for exporting messages.
 
     Returns:
         ExportResult: The result of the export operation, including statistics and any filter test message.
@@ -899,6 +889,13 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
 
     def _emit_log(errmsg: str, level: int = logging.INFO) -> None:
         logger.log(level, 'Folder("%s"): %s', folder["folderPath"], errmsg)
+
+    folder = export_context.folder
+    session = export_context.session
+    progress = export_context.progress
+    progress_task_id = export_context.progress_task_id
+    graph_config = export_context.graph_config
+    export_opts = export_context.export_opts
 
     folder_message_count = folder["totalItemCount"]
     export_result = ExportResult()
@@ -968,7 +965,7 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         attachments_folder=attachments_dir_path,
     )
 
-    export_opts = output_module.get_folder_export_opts(folder, export_opts)
+    export_opts = output_module.set_export_opts(export_opts)
 
     export_stats: ExportStatsT = {
         # Start with stats that will always be output
@@ -981,7 +978,6 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
     # https://learn.microsoft.com/en-us/graph/query-parameters
     params: dict[str, str | int] | None = {
         "$count": "true",
-        "$select": ",".join(sorted(EXPORT_MESSAGE_FIELDS)),
     }
 
     if export_opts.filter_query:
@@ -1001,13 +997,14 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         params["$top"] = export_opts.batch_size
         params["$orderby"] = "lastModifiedDateTime,internetMessageId,subject"
 
-    if export_opts.filter_test:
-        params["$select"] = "id"  # Might as well make the response shorter
-    elif exported_total_count:
+    if exported_total_count and not export_opts.filter_test:
         params["$skip"] = exported_total_count  # skip already exported messages
         exportstat_incr(export_stats, ExportStat.STAT_SKIPPED_DUPLICATE, incr=exported_total_count)
 
     output_module.update_list_messages_params(params)
+
+    if export_opts.filter_test:
+        params["$select"] = "id"  # Might as well make the response shorter; this *overrides* the output module!
 
     # https://learn.microsoft.com/en-us/graph/api/resources/mail-api-overview
     # https://learn.microsoft.com/en-us/graph/api/message-get
@@ -1105,7 +1102,7 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
                     progress,
                     progress_task_id,
                     first_batch_data,
-                    next_url,
+                    next_url,  # ignored when `first_batch_data` is set
                     params,
                     min(export_opts.batch_size, export_limit - exported_total_count),
                     manifest_ids,
@@ -1126,6 +1123,9 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
             exported_total_count += batch_total
             params = None  # included in 'nextLink' automatically
             first_batch_data = None
+
+    # Let output module finish up any messages it may have queued.
+    output_module.last_batch_complete()
 
     progress.update(progress_task_id, status="done")
 
@@ -1269,19 +1269,21 @@ def _export_folder_worker(  # noqa: C901
     # Reset task start time to get true elapsed time for this folder.
     progress.reset(progress_task_id, start=True)
 
-    output_module = EXPORT_MODULES[export_opts.out_format]()
+    output_module_type = EXPORT_MODULES[export_opts.out_format]
 
     try:
         with sessions.Session() as session:
-            return _export_folder(
-                folder,
-                session,
-                progress,
-                progress_task_id,
-                graph_config,
-                output_module,
-                export_opts,
+            export_context = ExportFolderContext(
+                folder=folder,
+                session=session,
+                graph_config=graph_config,
+                progress=progress,
+                progress_task_id=progress_task_id,
+                export_opts=export_opts,
             )
+
+            return _export_folder(export_context, output_module_type(export_context))
+
     except requests.RequestException as err:
         print_graph_request_exception(progress.console, err)
         _emit_log("Encountered an exception.", logging.DEBUG)
@@ -1302,7 +1304,7 @@ def _export_folder_worker(  # noqa: C901
     return ExportResult(aborted=True)
 
 
-def _export_folders(  # noqa: C901, PLR0915
+def _export_folders(  # noqa: C901, PLR0912, PLR0915
     folders: list[GraphFolderT],
     graph_config: GraphApiConfig,
     export_opts: ExportOptions,
@@ -1374,6 +1376,9 @@ def _export_folders(  # noqa: C901, PLR0915
         ]
 
     export_results: dict[str, tuple[GraphFolderT, ExportResult | None]] = {}  # {id:(folder, result)}
+
+    if max_threads and max_threads >= MAX_EXPORT_WORKERS:
+        max_threads = None  # let ThreadPoolExecutor decide
 
     with (
         concurrent.futures.ThreadPoolExecutor(max_threads) as executor,
@@ -1756,6 +1761,7 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         int | None,
         typer.Option(
             min=1,
+            max=MAX_EXPORT_WORKERS,
             rich_help_panel="Other options",
             help="Maximum size of thread pool.",
         ),
@@ -1853,6 +1859,12 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         err_console.print("No folders selected to export.")
         raise typer.Exit(code=1)
 
+    # We don't need more threads than we have folders.
+    if max_threads:
+        max_threads = min(max_threads, len(folders))
+    elif len(folders) < MAX_EXPORT_WORKERS:
+        max_threads = len(folders)
+
     export_opts = ExportOptions(
         out_format=out_format,
         attachments_folder=attachments_folder,
@@ -1874,6 +1886,7 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         search_query=search_query,
         root_out_dir=out_dir,
         with_attachments=with_attachments,
+        max_workers=max_threads or MAX_EXPORT_WORKERS,
     )
 
     if filter_test:

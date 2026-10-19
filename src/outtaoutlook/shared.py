@@ -14,12 +14,15 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from operator import itemgetter
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import msal
 import requests
-from requests import sessions
+from requests import Response, sessions
 from rich.console import Console
+
+if TYPE_CHECKING:
+    from rich.progress import Progress, TaskID
 
 ######################################################################
 # Constants
@@ -34,6 +37,7 @@ MAILBOX_ROOT = None
 VERBOSE_LOGGING_LEVEL_ERROR = 0  # logging.ERROR
 TITLE_UNTITLED = "Untitled"
 TITLE_MAXLEN = 255 - 25  # macOS limit minus a few characters for whatever `unique_file_path` tacks on
+GRAPH_API_TIMEOUT = 30
 
 # These are banned outright: \/:
 # Links do not work if title includes: #^[]|
@@ -253,6 +257,7 @@ class CommandContext:
 class OutputFormatChoice(StrEnum):
     """Choices for output file format."""
 
+    eml = "eml"
     html = "html"
     json = "json"
     md = "md"
@@ -300,6 +305,19 @@ class ExportOptions:
     search_query: str | None  # --search criteria from command line and config file.
     root_out_dir: Path  # Root output directory (set by user.)
     with_attachments: bool  # Whether to download and link attachments to files.
+    max_workers: int  # Maximum number of workers being used for exporting.
+
+
+@dataclass
+class ExportFolderContext:
+    """Context for exporting a folder."""
+
+    folder: GraphFolderT
+    session: sessions.Session
+    graph_config: GraphApiConfig
+    progress: Progress
+    progress_task_id: TaskID
+    export_opts: ExportOptions
 
 
 ExportStatsT = dict[ExportStat, int]
@@ -315,6 +333,7 @@ logger = logging.getLogger(APP_NAME)  # initialized in __main__
 
 # Graph API limits concurrent requests.
 # Requests will fail with 'MailboxConcurrency' error if limit is exceeded.
+# https://learn.microsoft.com/en-us/graph/throttling-limits
 GRAPH_API_CONCURRENT_LIMIT = 4
 graph_get_resource_lock = threading.Semaphore(GRAPH_API_CONCURRENT_LIMIT)
 
@@ -543,7 +562,7 @@ def get_graph_client(  # noqa: C901, PLR0912
     return app, cache, account, token
 
 
-def graph_get_resource(  # noqa: C901
+def graph_get_resource(
     session: sessions.Session,
     graph_config: GraphApiConfig,
     url: str,
@@ -566,84 +585,6 @@ def graph_get_resource(  # noqa: C901
         requests.RequestException derived error (e.g. ConnectionError, JSONDecodeError, HTTPError, etc.)
         OSError derived error (e.g. file system errors, permission errors, etc.)
     """
-
-    def _get_cache_file_path_and_header() -> tuple[Path | None, dict[str, Any]]:
-        if not (graph_config.cache_enabled and graph_config.cache_dir):
-            return None, {}
-
-        cache_json_header = {
-            "request": {
-                "method": "GET",
-                "url": url,
-                "params": params,
-            },
-            "auth": {
-                "environment": graph_config.token_info.environment,
-                "tenant": graph_config.token_info.tenant,
-                "client": graph_config.token_info.client,
-                "username": graph_config.token_info.username,
-            },
-        }
-
-        cache_file_key = json.dumps(cache_json_header, sort_keys=True)  # sort to keep deterministic
-        cache_file_name = get_hash_filename(cache_file_key, "graph_api", ".json")
-        cache_file_path = graph_config.cache_dir / cache_file_name
-
-        return cache_file_path, cache_json_header
-
-    def _get_cached_response(req_url: str) -> GraphApiReturnT | None:
-        if not (cache_file_path and cache_file_path.is_file()):
-            return None
-
-        cached_resp_json = json.loads(cache_file_path.read_text(encoding="utf-8"))
-
-        response = cached_resp_json.get("response")
-        if not response:
-            return None
-
-        # The cached request must match the current request and authentication details.
-        for key in ("request", "auth"):
-            if cache_json_header[key] != cached_resp_json[key]:
-                logger.warning(
-                    "Graph API cache mismatch! %s(%s) != cached(%s)",
-                    key,
-                    cache_json_header[key],
-                    cached_resp_json[key],
-                )
-                return None
-
-        logger.debug(
-            'Using cached Graph API response for "GET %s" - %d',
-            req_url,
-            response.get("contentLength"),
-        )
-
-        return response["content"]
-
-    def _get_content_as_json(resp: requests.Response) -> dict[str, Any]:
-        # e.g. "application/json; odata.metadata=minimal; odata.streaming=true; IEEE754Compatible=false; charset=utf-8"
-        content_type = resp.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
-
-        if content_type == "application/json":
-            return resp.json()
-
-        # Most Graph API responses are JSON but some endpoints such as '/attachments/id/$value'
-        # return plain text or other content types.
-        # Property names are consistent with those returned by '/attachments/id/$value'.
-
-        if content_type == "text/plain":
-            return {
-                "contentType": content_type,
-                "contentBytes": resp.text,
-                "size": len(resp.text),
-            }
-
-        return {
-            "contentType": content_type,
-            "contentBytes": resp.content,
-            "size": len(resp.content),
-        }
-
     req_headers = {
         "Authorization": f"Bearer {graph_config.access_token}",
         "Content-Type": "application/json",
@@ -655,35 +596,22 @@ def graph_get_resource(  # noqa: C901
     req = requests.Request("GET", url, headers=req_headers, params=params).prepare()
     assert req.url is not None  # noqa: S101
 
-    cache_file_path, cache_json_header = _get_cache_file_path_and_header()
+    cache_file_path, cache_json_header = _get_cache_file_path_and_header(graph_config, "GET", url, params=params)
 
     if cache_file_path:
-        resp_json = _get_cached_response(req.url)
+        resp_json = _get_cached_response(cache_file_path, req.url, cache_json_header)
         if resp_json is not None:
             return resp_json
 
     with graph_get_resource_lock:
-        resp = session.send(req, timeout=30)
+        resp = session.send(req, timeout=GRAPH_API_TIMEOUT)
 
     resp.raise_for_status()
 
     resp_json = _get_content_as_json(resp)
 
     if cache_file_path:
-        cache_file_path.write_text(
-            json.dumps(
-                cache_json_header
-                | {
-                    "response": {
-                        "date": datetime_now().isoformat(),
-                        "contentType": "application/json",
-                        "contentLength": resp_json.get("size") or len(resp.text),
-                        "content": resp_json,
-                    },
-                },
-            ),
-            encoding="utf-8",
-        )
+        _write_cached_response(cache_file_path, cache_json_header, resp, resp_json)
 
     return resp_json
 
@@ -1146,3 +1074,333 @@ def write_output_file(
         logger.debug("Wrote file to '%s'", file_path.name)
     else:
         logger.debug("Wrote file to '%s' (dry run)", file_path.name)
+
+
+def _get_cache_file_path_and_header(
+    graph_config: GraphApiConfig,
+    method: str,
+    url: str,
+    *,
+    params: dict[str, Any] | None,
+    cache_key: dict[str, Any] | None = None,
+) -> tuple[Path | None, dict[str, Any]]:
+    """Get the cache file path and header for a Graph API request.
+
+    Args:
+        graph_config (GraphApiConfig): Graph API configuration.
+        method (str): HTTP method (e.g., "GET", "POST").
+        url (str): The request URL.
+        params (dict[str, Any] | None): Query parameters for the request.
+        cache_key (dict, optional): Cache key to add specificity. Stored in the cached file as a sha256 hash.
+
+    Returns:
+        tuple[Path | None, dict[str, Any]]: (File path to write to, JSON header used for the cache key)
+    """
+    if not (graph_config.cache_enabled and graph_config.cache_dir):
+        return None, {}
+
+    cache_json_header: dict[str, Any] = {
+        "@etag": "",
+        "request": {
+            "method": method,
+            "url": url,
+            "params": params,
+        },
+        "auth": {
+            "environment": graph_config.token_info.environment,
+            "tenant": graph_config.token_info.tenant,
+            "client": graph_config.token_info.client,
+            "username": graph_config.token_info.username,
+        },
+    }
+
+    if cache_key:
+        cache_json_header["@etag"] = hashlib.sha256(json.dumps(cache_key, sort_keys=True).encode("utf-8")).hexdigest()
+
+    cache_file_key = json.dumps(cache_json_header, sort_keys=True)  # sort to keep deterministic
+    cache_file_name = get_hash_filename(cache_file_key, "graph_api", ".json")
+    cache_file_path = graph_config.cache_dir / cache_file_name
+
+    return cache_file_path, cache_json_header
+
+
+def _get_cached_response(cache_file_path: Path, req_url: str, cache_json_header: dict) -> GraphApiReturnT | None:
+    """Read cached response from cache.
+
+    Args:
+        cache_file_path (Path): Path to the cache file.
+        req_url (str): The request URL.
+        cache_json_header (dict): JSON header used for the cache key.
+
+    Returns:
+        GraphApiReturnT | None: JSON object or None if request was not found in cache.
+    """
+    if not (cache_file_path and cache_file_path.is_file()):
+        return None
+
+    cached_resp_json = json.loads(cache_file_path.read_text(encoding="utf-8"))
+
+    response = cached_resp_json.get("response")
+    if not response:
+        return None
+
+    # The cached request must match the current request and authentication details.
+    for key in ("request", "auth", "@etag"):
+        if cache_json_header[key] != cached_resp_json[key]:
+            logger.warning(
+                "Graph API cache mismatch! %s(%s) != cached(%s)",
+                key,
+                cache_json_header[key],
+                cached_resp_json[key],
+            )
+            return None
+
+    logger.debug(
+        'Using cached Graph API response for "%s %s" - %d',
+        cache_json_header["request"]["method"],
+        req_url,
+        response.get("contentLength"),
+    )
+
+    return response["content"]
+
+
+def _get_content_as_json(resp: requests.Response) -> dict[str, Any]:
+    """Return response content as a JSON object, even if server replies with another content type.
+
+    Args:
+        resp (requests.Response): The response.
+
+    Returns:
+        dict[str, Any]: JSON object.
+    """
+    # e.g. "application/json; odata.metadata=minimal; odata.streaming=true; IEEE754Compatible=false; charset=utf-8"
+    content_type = resp.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+
+    if content_type == "application/json":
+        return resp.json()
+
+    # Most Graph API responses are JSON but some endpoints such as '/attachments/id/$value'
+    # return plain text or other content types.
+    # Property names are consistent with those returned by '/attachments/id/$value'.
+
+    if content_type == "text/plain":
+        return {
+            "contentType": content_type,
+            "contentBytes": resp.text,
+            "size": len(resp.text),
+        }
+
+    return {
+        "contentType": content_type,
+        "contentBytes": resp.content,
+        "size": len(resp.content),
+    }
+
+
+def _write_cached_response(
+    cache_file_path: Path,
+    cache_json_header: dict[str, Any],
+    resp: Response,
+    resp_json: dict[str, Any],
+) -> None:
+    """Write a JSON response to cache directory.
+
+    Args:
+        cache_file_path (Path): Cache file path to write the response to.
+        cache_json_header (dict[str, Any]): JSON header containing request and authentication details.
+        resp (Response): The HTTP response object.
+        resp_json (dict[str, Any]): The JSON response to be cached.
+    """
+    if cache_file_path:
+        cache_file_path.write_text(
+            json.dumps(
+                cache_json_header
+                | {
+                    "response": {
+                        "date": datetime_now().isoformat(),
+                        "contentType": "application/json",
+                        "contentLength": resp_json.get("size") or len(resp.text),
+                        "content": resp_json,
+                    },
+                },
+            ),
+            encoding="utf-8",
+        )
+
+
+def _batch_raise_for_status(url: str, resp: requests.Response, resp_json: dict[str, Any]) -> None:
+    """Raise an HTTPError exception if any batch individual responses returned an error code.
+
+    Args:
+        url (str): The URL.
+        resp (requests.Response): The POST response.
+        resp_json (dict[str, Any]): The JSON response from the batch request.
+
+    Raises:
+        requests.HTTPError
+    """
+    # The batch response contains an array of individual responses.
+    for response in resp_json.get("responses", []):
+        status_code = response.get("status")
+        if status_code == 200:  # noqa: PLR2004
+            return
+
+        error = response.get("body", {}).get("error", {})
+        code = error.get("code")  # BadRequest
+        message = error.get("message")  # "Resource not found for the segment 'messages'."
+
+        if 400 <= status_code < 500:  # noqa: PLR2004
+            http_error_msg = f"{message} {status_code} Client Error: {code} for url: {url}"
+        elif 500 <= status_code < 600:  # noqa: PLR2004
+            http_error_msg = f"{message} {status_code} Server Error: {code} for url: {url}"
+        else:
+            http_error_msg = f"{message} {status_code} Unexpected Error: {code} for url: {url}"
+
+        raise requests.HTTPError(http_error_msg, response=resp)
+
+
+def graph_post_resource(  # noqa: PLR0913, PLR0917
+    session: sessions.Session,
+    graph_config: GraphApiConfig,
+    url: str,
+    json_data: dict[str, Any],
+    params: dict[str, Any] | None = None,
+    headers: dict[str, Any] | None = None,
+    cache_key: dict[str, Any] | None = None,
+) -> GraphApiReturnT:
+    """Execute a POST request to Microsoft Graph API.
+
+    Args:
+        session (sessions.Session): Requests session to pool requests.
+        graph_config (GraphApiConfig): Graph API configuration.
+        url (str): Entity URL.
+        json_data (dict[str, Any]): JSON body for the POST request.
+        params (dict[str, Any], optional): Query parameters for the POST request. Defaults to None.
+        headers (dict[str, Any], optional): HTTP headers for the POST request. Defaults to None.
+        cache_key (dict, optional): Cache key for the batch request. Defaults to `json_data` if not provided.
+
+    Returns:
+        GraphApiReturnT: JSON response from the Microsoft Graph API.
+
+    Raises:
+        requests.RequestException derived error (e.g. ConnectionError, JSONDecodeError, HTTPError, etc.)
+        OSError derived error (e.g. file system errors, permission errors, etc.)
+    """
+    req_headers = {
+        "Authorization": f"Bearer {graph_config.access_token}",
+        "Content-Type": "application/json",
+    }
+
+    if headers:
+        req_headers.update(headers)
+
+    req = requests.Request("POST", url, headers=req_headers, params=params, json=json_data).prepare()
+    assert req.url is not None  # noqa: S101
+
+    cache_file_path, cache_json_header = _get_cache_file_path_and_header(
+        graph_config,
+        "POST",
+        url,
+        params=params,
+        cache_key=cache_key or json_data,
+    )
+
+    if cache_file_path:
+        resp_json = _get_cached_response(cache_file_path, req.url, cache_json_header)
+        if resp_json is not None:
+            return resp_json
+
+    with graph_get_resource_lock:
+        resp = session.send(req, timeout=GRAPH_API_TIMEOUT)
+
+    resp.raise_for_status()
+
+    resp_json = _get_content_as_json(resp)
+
+    if url.endswith("/$batch"):
+        _batch_raise_for_status(url, resp, resp_json)
+
+    if cache_file_path:
+        _write_cached_response(cache_file_path, cache_json_header, resp, resp_json)
+
+    return resp_json
+
+
+def graph_get_resource_batch(  # noqa: PLR0913
+    session: sessions.Session,
+    graph_config: GraphApiConfig,
+    urls: dict[str, str],
+    *,
+    params: dict[str, Any] | None = None,
+    headers: dict[str, Any] | None = None,
+    cache_key: dict[str, Any] | None = None,
+    sequence: bool = True,
+) -> dict[str, GraphApiReturnT]:
+    """Execute a batch of GET request to Microsoft Graph API.
+
+    https://learn.microsoft.com/en-us/graph/json-batching
+
+    The Outlook Graph API limits requests to 4 concurrent requests and will fail if the limit is exceeded.
+    When sending a batch request, Microsoft Graph sends the Outlook service up to 4 individual requests
+    from the batch at a time. If another request is made during this time, the limit will have been exceeded
+    and the batch will fail. The solution when using multiple threads is to sequence the batch individual requests.
+
+    Args:
+        session (sessions.Session): Requests session to pool requests.
+        graph_config (GraphApiConfig): Graph API configuration.
+        urls (dict[str, str]): Entity URLs mapped by request ID.
+        params (dict, optional): Query parameters for the GET request. Defaults to None.
+        headers (dict, optional): HTTP headers for the GET request. Defaults to None.
+        cache_key (dict, optional): Cache key for the batch request. Defaults to requested URLs if not provided.
+        sequence (bool, optional): True if individual batched requests should be executed in sequence. Defaults to True.
+
+    Returns:
+        dict[str, GraphApiReturnT]: Dictionary mapping request IDs to their JSON responses.
+
+    Raises:
+        requests.RequestException derived error (e.g. ConnectionError, JSONDecodeError, HTTPError, etc.)
+        OSError derived error (e.g. file system errors, permission errors, etc.)
+    """
+    if not urls:
+        msg = "No URLs provided for the batch request."
+        raise ValueError(msg)
+
+    logger.debug(
+        "Graph API POST request for batch of %d URLs (%s)",
+        len(urls),
+        "sequenced" if sequence else "parallel",
+    )
+
+    depends_id = 0
+    requests: list[dict[str, Any]] = []
+    request_id_map: dict[int, str] = {}
+
+    for request_id, url in urls.items():
+        # Outlook message IDs are too long to be used as batch request ID
+        short_id = len(requests) + 1
+        request_id_map[short_id] = request_id
+
+        request: dict[str, str | int | list[int]] = {
+            "id": short_id,
+            "method": "GET",
+            "url": url.removeprefix(GRAPH_API_URL),
+        }
+
+        if sequence and depends_id:
+            request["dependsOn"] = [depends_id]
+        depends_id = short_id
+
+        requests.append(request)
+
+    data = graph_post_resource(
+        session,
+        graph_config,
+        f"{GRAPH_API_URL}/$batch",
+        json_data={"requests": requests},
+        params=params,
+        headers=headers,
+        cache_key=cache_key,
+    )
+
+    return {request_id_map[int(resp["id"])]: resp for resp in data.get("responses", [])}

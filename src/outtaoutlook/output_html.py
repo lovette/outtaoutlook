@@ -2,12 +2,13 @@
 
 import logging
 from pathlib import Path
+from typing import Self
 
 from outtaoutlook.shared import (
+    ExportFolderContext,
     ExportOptions,
     ExportStat,
     ExportStatsT,
-    GraphFolderT,
     GraphMessageT,
     exportstat_incr,
     log_message_notice,
@@ -16,38 +17,60 @@ from outtaoutlook.shared import (
 )
 
 ######################################################################
+# Constants
+
+# Message fields we require for exporting.
+SELECT_MESSAGE_FIELDS = ",".join(
+    sorted(
+        [
+            "id",
+            "subject",
+            "body",
+            "isDraft",
+            "hasAttachments",
+            "createdDateTime",
+            "lastModifiedDateTime",
+            "sentDateTime",
+            "receivedDateTime",
+        ],
+    ),
+)
+######################################################################
 # Public module class
 
 
 class ExportFormatHtml:
     """Implements the `OutputFormatModule` protocol for HTML output."""
 
-    @staticmethod
-    def get_folder_export_opts(
-        folder: GraphFolderT,  # noqa: ARG004
-        export_opts: ExportOptions,
-    ) -> ExportOptions:
-        """Generate export options for a specific folder.
+    def __init__(self, export_context: ExportFolderContext) -> None:
+        """Object constructor.
 
         Args:
-            folder (GraphFolderT): The folder being exported.
+            export_context (ExportFolderContext): Context for the folder being exported.
+        """
+        self.export_context = export_context
+
+    def set_export_opts(self: Self, export_opts: ExportOptions) -> ExportOptions:
+        """Set and optionally update export options for messages in the current folder.
+
+        Args:
             export_opts (ExportOptions): Base export options.
 
         Returns:
-            ExportOptions: A copy of export options to use for messages in this folder.
+            ExportOptions: Export options to use for messages in this folder.
         """
         return export_opts
 
-    @staticmethod
-    def update_list_messages_params(params: dict[str, str | int]) -> None:
+    def update_list_messages_params(self: Self, params: dict[str, str | int]) -> None:
         """Update parameters used in the '/messages' Graph API request.
 
         Args:
             params (dict[str, str | int]): Dictionary of parameters to update.
         """
+        params["$select"] = SELECT_MESSAGE_FIELDS
 
-    @staticmethod
     def get_file_path(
+        self: Self,
         message: GraphMessageT,
         export_opts: ExportOptions,
     ) -> Path:
@@ -65,11 +88,11 @@ class ExportFormatHtml:
 
         return unique_file_path(export_opts.files_dir / Path(title + ".html"), file_date)
 
-    @staticmethod
     def export_message(
+        self: Self,
         message: GraphMessageT,
         file_path: Path,
-        attachment_paths: list[Path] | None,  # noqa: ARG004
+        attachment_paths: list[Path] | None,  # noqa: ARG002
         export_opts: ExportOptions,
         export_stats: ExportStatsT,
     ) -> bool:
@@ -122,3 +145,6 @@ class ExportFormatHtml:
         exportstat_incr(export_stats, ExportStat.STAT_FILE_CREATED)
 
         return True
+
+    def last_batch_complete(self: Self) -> None:
+        """Called after the last batch of messages for a folder is complete.."""

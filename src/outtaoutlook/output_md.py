@@ -7,6 +7,7 @@ import unicodedata
 from collections.abc import Sequence
 from decimal import Decimal
 from pathlib import Path
+from typing import Self
 from urllib.parse import unquote
 
 import yaml
@@ -14,6 +15,7 @@ from html_to_markdown import ConversionOptions
 from html_to_markdown import convert as convert_to_markdown
 
 from outtaoutlook.shared import (
+    ExportFolderContext,
     ExportOptions,
     ExportStat,
     ExportStatsT,
@@ -33,6 +35,22 @@ from outtaoutlook.shared import (
 # Tag and property variables in the format '{tag.propertyName}'
 RE_TAG_VAR = re.compile(r"{[a-zA-Z.]+}")
 
+# Message fields we require for exporting.
+SELECT_MESSAGE_FIELDS = ",".join(
+    sorted(
+        [
+            "id",
+            "subject",
+            "body",
+            "isDraft",
+            "hasAttachments",
+            "createdDateTime",
+            "lastModifiedDateTime",
+            "sentDateTime",
+            "receivedDateTime",
+        ],
+    ),
+)
 
 ######################################################################
 # Types and classes
@@ -377,20 +395,25 @@ def _md_link_text(rel_path_or_uri: str, *, inline: bool) -> str:
 class ExportFormatMarkdown:
     """Implements the `OutputFormatModule` protocol for Markdown output."""
 
-    @staticmethod
-    def get_folder_export_opts(
-        folder: GraphFolderT,
-        export_opts: ExportOptions,
-    ) -> ExportOptions:
-        """Generate export options for a specific folder.
+    def __init__(self, export_context: ExportFolderContext) -> None:
+        """Object constructor.
 
         Args:
-            folder (GraphFolderT): The folder being exported.
+            export_context (ExportFolderContext): Context for the folder being exported.
+        """
+        self.export_context = export_context
+
+    def set_export_opts(self: Self, export_opts: ExportOptions) -> ExportOptions:
+        """Set and optionally update export options for messages in the current folder.
+
+        Args:
             export_opts (ExportOptions): Base export options.
 
         Returns:
-            ExportOptions: A copy of export options to use for messages in this folder.
+            ExportOptions: Export options to use for messages in this folder.
         """
+        folder = self.export_context.folder
+
         # Dynamic variables that can be referenced in tags and metadata properties.
         folder_tag_vars = {
             "{folder.displayName}": folder["displayName"],
@@ -404,16 +427,16 @@ class ExportFormatMarkdown:
             md_metaprop=_expand_folder_metaprop(folder, export_opts.md_metaprop, folder_tag_vars),
         )
 
-    @staticmethod
-    def update_list_messages_params(params: dict[str, str | int]) -> None:
+    def update_list_messages_params(self: Self, params: dict[str, str | int]) -> None:
         """Update parameters used in the '/messages' Graph API request.
 
         Args:
             params (dict[str, str | int]): Dictionary of parameters to update.
         """
+        params["$select"] = SELECT_MESSAGE_FIELDS
 
-    @staticmethod
     def get_file_path(
+        self: Self,
         message: GraphMessageT,
         export_opts: ExportOptions,
     ) -> Path:
@@ -431,8 +454,8 @@ class ExportFormatMarkdown:
 
         return unique_file_path(export_opts.files_dir / Path(title + ".md"), file_date)
 
-    @staticmethod
     def export_message(  # noqa: C901, PLR0912
+        self: Self,
         message: GraphMessageT,
         file_path: Path,
         attachment_paths: list[Path] | None,
@@ -550,3 +573,6 @@ class ExportFormatMarkdown:
         exportstat_incr(export_stats, ExportStat.STAT_FILE_CREATED)
 
         return True
+
+    def last_batch_complete(self: Self) -> None:
+        """Called after the last batch of messages for a folder is complete.."""
