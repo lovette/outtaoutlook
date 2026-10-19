@@ -364,6 +364,36 @@ def _coerce_datetime(dt: str | None) -> datetime | None:
         return None
 
 
+def _export_mkdir(
+    dir_path: Path,
+    name: str,
+    *,
+    parents: bool = False,
+    exist_ok: bool = True,
+    export_opts: ExportOptions,
+) -> None:
+    """Create an export related directory if it doesn't exist.
+
+    Args:
+        dir_path (Path): Directory path.
+        name (str): Purpose of the directory (used for logging.)
+        export_opts (ExportOptions): Export options.
+        parents (bool, optional): Whether to create parent directories if they don't exist. Defaults to False.
+        exist_ok (bool, optional): Whether to ignore the error if the directory already exists. Defaults to True.
+    """
+    if not dir_path.is_dir():
+        if not export_opts.dry_run:
+            try:
+                dir_path.mkdir(parents=parents, exist_ok=exist_ok)
+            except OSError as err:
+                logger.error("Failed to create %s directory: %s", name, str(err))  # noqa: TRY400
+                raise
+
+            logger.info("Created %s directory '%s'", name, dir_path)
+        else:
+            logger.info("Created %s directory '%s' (dry run)", name, dir_path)
+
+
 def _list_messages(
     session: sessions.Session,
     graph_config: GraphApiConfig,
@@ -564,6 +594,14 @@ def _save_attachment(  # noqa: PLR0913, PLR0917
 
     assert isinstance(export_opts.attachments_folder, Path)  # noqa: S101
     assert export_opts.attachments_folder.is_absolute()  # noqa: S101
+
+    # Create attachments directory the first time an attachment is saved.
+    _export_mkdir(
+        export_opts.attachments_folder,
+        "attachments",
+        parents=export_opts.attachments_mkdir,
+        export_opts=export_opts,
+    )
 
     attachment_path = unique_file_path(export_opts.attachments_folder / Path(attachment["name"]), file_date)
 
@@ -842,19 +880,6 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         OSError derived error (e.g. file system errors, permission errors, etc.)
     """
 
-    def _mkdir(dir_path: Path, name: str, *, parents: bool = False, exist_ok: bool = True) -> None:
-        if not dir_path.is_dir():
-            if not export_opts.dry_run:
-                try:
-                    dir_path.mkdir(parents=parents, exist_ok=exist_ok)
-                except OSError as err:
-                    progress.print(f"Failed to create {name} directory: {err}")
-                    raise
-
-                logger.info("Created %s directory '%s'", name, dir_path)
-            else:
-                logger.info("Created %s directory '%s' (dry run)", name, dir_path)
-
     def _write_manifest() -> None:
         if manifest_file_path:
             manifest_file_path.write_text(
@@ -927,16 +952,17 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
 
     if not export_opts.filter_test:
         _emit_log(f"Saving files to '{files_dir}'")
-        _mkdir(files_dir, "files", parents=export_opts.files_mkdir)
+        _export_mkdir(files_dir, "files", parents=export_opts.files_mkdir, export_opts=export_opts)
 
         if export_opts.with_attachments:
             _emit_log(f"Saving attachments to '{attachments_dir_path}'")
-            _mkdir(attachments_dir_path, "attachments", parents=attachments_mkdir)
+            # Attachments directory will be created the first time an attachment is saved.
 
     # Tweak export options without modifying caller
     export_opts = copy.replace(
         export_opts,
         files_dir=files_dir,
+        attachments_mkdir=attachments_mkdir,
         attachments_folder=attachments_dir_path,
     )
 
