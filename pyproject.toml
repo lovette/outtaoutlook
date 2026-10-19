@@ -1,7 +1,7 @@
 [project]
 name = "outtaoutlook"
 version = "0.1.0"
-description = "Download messages from Microsoft Outlook using the Microsoft Graph API and save them to an Obsidian vault."
+description = "Gets your emails outta Microsoft Outlook and saves them locally in various file formats."
 readme = "README.md"
 authors = [
     { name = "Lance Lovette", email = "lance.lovette@gmail.com" }

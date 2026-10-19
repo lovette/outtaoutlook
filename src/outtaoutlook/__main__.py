@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create Obsidian notes from Microsoft Outlook messages using the Microsoft Graph API."""
+"""Gets your emails outta Microsoft Outlook and saves them locally in various file formats."""
 
 import copy
 import importlib.metadata
@@ -374,7 +374,7 @@ def main(  # noqa: PLR0913, PLR0917
         ),
     ] = None,
 ) -> None:
-    """Download messages from Microsoft Outlook using the Microsoft Graph API and save them to an Obsidian vault."""
+    """Gets your emails outta Microsoft Outlook and saves them locally in various file formats."""
     ctx.ensure_object(CommandContext)
     ctx_obj: CommandContext = ctx.obj
 
