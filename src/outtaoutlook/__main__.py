@@ -239,6 +239,7 @@ def _opt_config_file_callback(  # noqa: C901, PLR0915
                 ("filter", list),  # --filter
                 ("search", list),  # --search
                 ("not_folder", list),  # --not-folder
+                ("folder", list),  # --folder
             ):
                 if opt_var in export_cmd_config:
                     config_value = export_cmd_config.get(opt_var)

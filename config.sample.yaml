@@ -51,6 +51,17 @@ ls:
 # You cannot use `search` and `filter` together.
 
 export:
+  vault_dir: "~/Temp/outtaoutlook"
+
+  allfolders: false
+  folder:
+    - Drafts
+
+  not_folder:
+    - "Clutter"
+    - "Deleted Items"
+    - "Junk Email"
+
   place_tags_frontmatter: true
   place_tags_body_end: false
   use_manifest: true
@@ -93,6 +104,3 @@ export:
   body_tag:
     - "Tag A"
     - "Tag B"
-
-  not_folder:
-    - "Deleted Items"

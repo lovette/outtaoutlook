@@ -94,7 +94,6 @@ abort_workers_event = threading.Event()
 TITLE_UNTITLED = "Untitled"
 TITLE_MAXLEN = 255 - 25  # macOS limit minus a few characters for whatever `_unique_out_path` tacks on
 MIN_PROGRESS_THRESHOLD = 10  # Hide progress if only a few messages
-EXPORT_FOLDER_MSGFOLDERROOT = "msgfolderroot"
 FIRST_BATCH_COMPLETE_EVENT_WAIT = 60  # seconds; just a failsafe, I don't expect there to be any deadlocking :)
 FOLDER_ICON = "\N{OPEN FILE FOLDER}\N{NARROW NO-BREAK SPACE}"
 
@@ -314,6 +313,28 @@ def _opt_attachments_folder_callback(attachments_folder: str) -> str:
 
     errmsg = f"Directory '{attachments_folder}' does not exist."
     raise typer.BadParameter(errmsg)
+
+
+def _opt_vault_dir_callback(vault_dir: str) -> str:
+    """Handle `--vault_dir` command option.
+
+    Args:
+        vault_dir (str): Command line option value.
+
+    Returns:
+        str: Special keyword, valid folder name or absolute path.
+    """
+    if not vault_dir:
+        errmsg = "A path to an existing directory is required."
+        raise typer.BadParameter(errmsg)
+
+    # Absolute or relative path to a directory optionally with ~ or $ENV variables.
+    vault_dir_path = path_with_vars(vault_dir)
+    if not vault_dir_path.is_dir():
+        errmsg = f"Directory '{vault_dir}' does not exist."
+        raise typer.BadParameter(errmsg)
+
+    return str(vault_dir_path)
 
 
 def _opt_metaprop_callback(
@@ -1989,26 +2010,39 @@ def _validate_config_file_collection(
 
 
 @app.command()
-def export(  # noqa: PLR0913, PLR0915, PLR0917
+def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
     ctx: typer.Context,
-    folder_name: Annotated[
-        list[str],
-        typer.Argument(
-            hidden=True,
-            metavar=f"'{EXPORT_FOLDER_MSGFOLDERROOT}'|FOLDER ...",
-        ),
-    ],
     vault_dir: Annotated[
-        Path,
-        typer.Argument(
-            hidden=True,
-            exists=True,
+        Path | None,
+        typer.Option(
+            "--vault_dir",
+            "-o",
+            exists=False,  # _opt_vault_dir_callback will confirm
             dir_okay=True,
             file_okay=False,
             writable=True,
-            metavar="VAULT",
+            metavar="DIRECTORY",
+            help="Write output files to this directory.",
+            callback=_opt_vault_dir_callback,
         ),
-    ],
+    ] = None,
+    folder: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--folder",
+            "-f",
+            metavar="FOLDER",
+            help="Export messages in this mail folder; option can be used more than once. [required unless using --mailbox]",
+        ),
+    ] = None,
+    allfolders: Annotated[  # noqa: FBT002
+        bool,
+        typer.Option(
+            "--mailbox",
+            "--a",
+            help="Export messages in all top-level mail folders (and subfolders up to --maxdepth.)",
+        ),
+    ] = False,
     tag: Annotated[
         list[str] | None,
         typer.Option(
@@ -2041,7 +2075,7 @@ def export(  # noqa: PLR0913, PLR0915, PLR0917
         list[str] | None,
         typer.Option(
             "--filter",
-            "-f",
+            "-F",
             metavar="CONDITION",
             help="Export messages matching filter criteria; option can be used more than once.",
         ),
@@ -2113,7 +2147,6 @@ def export(  # noqa: PLR0913, PLR0915, PLR0917
     attachments_folder: Annotated[
         str,
         typer.Option(
-            hidden=False,
             exists=False,
             dir_okay=True,
             file_okay=False,
@@ -2182,14 +2215,13 @@ def export(  # noqa: PLR0913, PLR0915, PLR0917
         ),
     ] = False,
 ) -> None:
-    """Export messages from mailbox FOLDER to VAULT.
+    """Export email messages from Microsoft Outlook and save them locally in various file formats.
 
     For guidance on using filters, see:
     https://learn.microsoft.com/en-us/graph/filter-query-parameter
 
     For guidance on using search, see:
     https://learn.microsoft.com/en-us/graph/search-query-parameter
-
     """
     # Options common to all commands
     ctx_obj: CommandContext = ctx.obj
@@ -2205,6 +2237,7 @@ def export(  # noqa: PLR0913, PLR0915, PLR0917
     config_file_filters: list[str] = config_file_export_opts.get("filter", [])
     config_file_search: list[str] = config_file_export_opts.get("search", [])
     config_file_not_folder: list[str] = config_file_export_opts.get("not_folder", [])
+    config_file_select_folder: list[str] = config_file_export_opts.get("folder", [])
 
     # Simple YAML syntax changes can result in values being interpreted as the wrong type!
     _validate_config_file_collection("tag", config_file_tags, list, str)
@@ -2213,12 +2246,14 @@ def export(  # noqa: PLR0913, PLR0915, PLR0917
     _validate_config_file_collection("filter", config_file_filters, list, str)
     _validate_config_file_collection("search", config_file_search, list, str)
     _validate_config_file_collection("not_folder", config_file_not_folder, list, str)
+    _validate_config_file_collection("folder", config_file_select_folder, list, str)
 
     note_tags = config_file_tags + (tag or [])
     note_body_tags = config_file_body_tags + (body_tag or [])
     note_metaprop = _merge_metaprops(config_file_metaprop, ctx_obj.export_metaprops)
     not_folder = config_file_not_folder + (not_folder or [])
     not_folder_set = {nf.lower() for nf in not_folder}
+    folder = config_file_select_folder + (folder or [])
 
     filter_query, search_query = _build_filter_query(
         config_file_filters + (message_filter or []),
@@ -2228,13 +2263,15 @@ def export(  # noqa: PLR0913, PLR0915, PLR0917
         filter_test=filter_test,
     )
 
-    vault_dir = vault_dir.absolute()
+    if not vault_dir:
+        errmsg = "Missing option '--vault_dir' / '-o'."
+        raise typer.BadParameter(errmsg)
+    if not (folder or allfolders):
+        errmsg = "At least one '--folder' or the '--mailbox' option must be specified."
+        raise typer.BadParameter(errmsg)
 
     try:
         graph_config = get_graph_config(common_opts)
-
-        # Are we exporting the entire mailbox?
-        folder_is_msgfolderroot = EXPORT_FOLDER_MSGFOLDERROOT in {f.lower() for f in folder_name}
 
         logger.debug("Resolving folder paths")
 
@@ -2242,7 +2279,7 @@ def export(  # noqa: PLR0913, PLR0915, PLR0917
             folders = graph_resolve_folder_paths(
                 session,
                 graph_config,
-                MAILBOX_ROOT if folder_is_msgfolderroot else folder_name,
+                MAILBOX_ROOT if allfolders else folder,
                 maxdepth=maxdepth,
             )
 
@@ -2290,7 +2327,7 @@ def export(  # noqa: PLR0913, PLR0915, PLR0917
         if search_query:
             console.print(f"[bold]Testing search criteria for {len(folders)} folders")
     else:
-        console.print(f"Exporting messages from {len(folders)} folders")
+        console.print(f"Exporting messages from {len(folders)} folders to '{vault_dir}'...")
         logger.debug("Querying Graph API for %d messages at a time", batch_size)
 
     if filter_query:
@@ -2302,5 +2339,7 @@ def export(  # noqa: PLR0913, PLR0915, PLR0917
         console.print(f"Search criteria: {search_query}")
     else:
         logger.debug("Search criteria: %s", search_query)
+
+    console.print()
 
     _export_folders(folders, graph_config, export_opts, max_threads)
