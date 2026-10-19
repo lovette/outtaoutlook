@@ -2037,8 +2037,9 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
             file_okay=False,
             writable=True,
             metavar="DIRECTORY",
-            help="Write output files to this directory.",
+            help="Write output files to this directory. [required]",
             callback=_opt_vault_dir_callback,
+            rich_help_panel="Output",
         ),
     ] = None,
     folder: Annotated[
@@ -2048,14 +2049,16 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
             "-f",
             metavar="FOLDER",
             help="Export messages in this mail folder; option can be used more than once. [required unless using --mailbox]",
+            rich_help_panel="Mail folders",
         ),
     ] = None,
     allfolders: Annotated[  # noqa: FBT002
         bool,
         typer.Option(
             "--mailbox",
-            "--a",
+            "-a",
             help="Export messages in all top-level mail folders (and subfolders up to --maxdepth.)",
+            rich_help_panel="Mail folders",
         ),
     ] = False,
     tag: Annotated[
@@ -2065,6 +2068,7 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
             "-t",
             metavar="TAG",
             help="Tag to apply to notes (placed either in frontmatter or body); option can be used more than once.",
+            rich_help_panel="Tags and metadata",
         ),
     ] = None,
     body_tag: Annotated[
@@ -2074,6 +2078,7 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
             "-b",
             metavar="TAG",
             help="Tag to place in notes body; option can be used more than once.",
+            rich_help_panel="Tags and metadata",
         ),
     ] = None,
     metaprop: Annotated[  # noqa: ARG001
@@ -2084,6 +2089,7 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
             callback=_opt_metaprop_callback,
             metavar="NAME=VALUE",
             help="Frontmatter metadata property to apply to notes; option can be used more than once.",
+            rich_help_panel="Tags and metadata",
         ),
     ] = None,
     message_filter: Annotated[
@@ -2093,6 +2099,7 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
             "-F",
             metavar="CONDITION",
             help="Export messages matching filter criteria; option can be used more than once.",
+            rich_help_panel="Filter and search",
         ),
     ] = None,
     filter_cond: Annotated[
@@ -2100,6 +2107,7 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         typer.Option(
             "--filter-cond",
             help="How to join multiple filter conditions (and/or).",
+            rich_help_panel="Filter and search",
         ),
     ] = FilterJoinCond.cond_and,
     filter_test: Annotated[  # noqa: FBT002
@@ -2107,6 +2115,7 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         typer.Option(
             "--filter-test",
             help="Test filter and search criteria and exit.",
+            rich_help_panel="Filter and search",
         ),
     ] = False,
     message_search: Annotated[
@@ -2116,6 +2125,7 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
             "-s",
             metavar="CONDITION",
             help="Export messages matching search criteria; option can be used more than once.",
+            rich_help_panel="Filter and search",
         ),
     ] = None,
     search_cond: Annotated[
@@ -2123,6 +2133,7 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         typer.Option(
             "--search-cond",
             help="How to join multiple search conditions (and/or).",
+            rich_help_panel="Filter and search",
         ),
     ] = FilterJoinCond.cond_and,
     not_folder: Annotated[
@@ -2132,24 +2143,28 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
             "-n",
             help="Exclude folder from export; option can be used more than once.",
             metavar="FOLDER",
+            rich_help_panel="Mail folders",
         ),
     ] = None,
     place_tags_frontmatter: Annotated[  # noqa: FBT002
         bool,
         typer.Option(
             help="Place --tag tags in note frontmatter.",
+            rich_help_panel="Tags and metadata",
         ),
     ] = False,
     place_tags_body_end: Annotated[  # noqa: FBT002
         bool,
         typer.Option(
             help="Place body tags at the end of the note instead of the top.",
+            rich_help_panel="Tags and metadata",
         ),
     ] = False,
     notes_mkdir: Annotated[  # noqa: FBT002
         bool,
         typer.Option(
             help="Create mail folder hierarchy in notes directory.",
+            rich_help_panel="Mail folders",
         ),
     ] = False,
     with_attachments: Annotated[  # noqa: FBT002
@@ -2157,6 +2172,7 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         typer.Option(
             "--attachments/--no-attachments",
             help="Download and link attachments to note.",
+            rich_help_panel="Attachments",
         ),
     ] = True,
     attachments_folder: Annotated[
@@ -2168,12 +2184,14 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
             writable=True,
             metavar=f"'{ATTACHMENTS_FOLDER_VAULT}'|'{ATTACHMENTS_FOLDER_NOTE}'|NAME|DIRECTORY",
             help="Store attachments in the vault, same folder as notes, a subfolder of notes, or another directory.",
+            rich_help_panel="Attachments",
             callback=_opt_attachments_folder_callback,
         ),
     ] = ATTACHMENTS_DEFAULT_FOLDER,
     attachments_mkdir: Annotated[  # noqa: FBT002
         bool,
         typer.Option(
+            rich_help_panel="Attachments",
             help="Create mail folder hierarchy in attachments directory when outside the vault.",
         ),
     ] = False,
@@ -2182,6 +2200,7 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         typer.Option(
             "--maxdepth",
             min=1,
+            rich_help_panel="Mail folders",
             help="Maximum depth of folder tree to export.",
         ),
     ] = 1,
@@ -2190,6 +2209,7 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         typer.Option(
             "--mkdir-maxdepth",
             min=1,
+            rich_help_panel="Mail folders",
             help="Maximum depth (from the leaf) of folder tree to create when creating mail folder hierarchy.",
         ),
     ] = None,
@@ -2197,6 +2217,7 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         bool,
         typer.Option(
             "--manifest/--no-manifest",
+            rich_help_panel="Other options",
             help="Write a manifest of exported messages and use to skip duplicates.",
         ),
     ] = True,
@@ -2205,6 +2226,7 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         typer.Option(
             min=1,
             help="Number of messages to export.",
+            rich_help_panel="Other options",
         ),
     ] = None,
     batch_size: Annotated[
@@ -2212,6 +2234,7 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         typer.Option(
             min=GRAPH_API_BATCH_MIN,
             max=GRAPH_API_BATCH_MAX,
+            rich_help_panel="Other options",
             help="Number of messages to to fetch in each Graph API request.",
         ),
     ] = GRAPH_API_BATCH_MAX,
@@ -2219,6 +2242,7 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         int | None,
         typer.Option(
             min=1,
+            rich_help_panel="Other options",
             help="Maximum size of thread pool.",
         ),
     ] = None,
@@ -2226,6 +2250,7 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         bool,
         typer.Option(
             "--dry-run",
+            rich_help_panel="Other options",
             help="Dry run; do not write any files.",
         ),
     ] = False,
