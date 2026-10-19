@@ -96,6 +96,7 @@ TITLE_MAXLEN = 255 - 25  # macOS limit minus a few characters for whatever `_uni
 MIN_PROGRESS_THRESHOLD = 10  # Hide progress if only a few messages
 EXPORT_FOLDER_MSGFOLDERROOT = "msgfolderroot"
 FIRST_BATCH_COMPLETE_EVENT_WAIT = 60  # seconds; just a failsafe, I don't expect there to be any deadlocking :)
+FOLDER_ICON = "\N{OPEN FILE FOLDER}\N{NARROW NO-BREAK SPACE}"
 
 ATTACHMENT_DEFAULT_SUFFIX = ".bin"
 ATTACHMENT_DEFAULT_NAME = "unnamed"  # suffix will be guessed
@@ -1830,7 +1831,7 @@ def _export_folders(  # noqa: C901, PLR0912, PLR0915
             # This keeps the task bars in hierarchical order and ensures
             # console output doesn't interrupt the progress display.
             progress_task_id = progress.add_task(
-                f"\N{OPEN FILE FOLDER}{folder['folderPath']}",
+                f"{FOLDER_ICON}{folder['folderPath']}",
                 start=False,
                 total=None,
                 visible=True,
