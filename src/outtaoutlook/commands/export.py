@@ -1797,7 +1797,7 @@ def _export_folder_worker(  # noqa: C901
     return ExportResult(aborted=True)
 
 
-def _export_folders(  # noqa: C901, PLR0912, PLR0915
+def _export_folders(  # noqa: C901, PLR0915
     folders: list[GraphFolderT],
     graph_config: GraphApiConfig,
     export_opts: ExportOptions,
@@ -1811,6 +1811,38 @@ def _export_folders(  # noqa: C901, PLR0912, PLR0915
         export_opts (ExportOptions): Options for exporting messages.
         max_threads (int or None): Maximum size of thread pool or None to decide based on hardware.
     """
+
+    def _print_export_results(results: dict[str, tuple[GraphFolderT, ExportResult | None]]) -> None:
+        # Filter export_results to items with messages or stats
+        results = {
+            folder_id: (folder, export_result)
+            for folder_id, (folder, export_result) in results.items()
+            if export_result and (export_result.messages or export_result.stats)
+        }
+
+        if not results:
+            return
+
+        console.print()
+        console.print("[bold]Results:")
+
+        for folder, export_result in results.values():
+            if export_result and (export_result.messages or export_result.stats):
+                console.print()
+                console.print(f"[bold]'{folder['folderPath']}'[/bold]:")
+
+                for level, messages in export_result.messages.items():
+                    for message in messages:
+                        if level == logging.ERROR:
+                            console.print(f"[red]- {message}[/red]")
+                        elif level == logging.WARNING:
+                            console.print(f"[yellow]- {message}[/yellow]")
+                        else:
+                            console.print(f"- {message}")
+
+                if export_result.stats:
+                    for stat, stat_count in export_result.stats.items():
+                        console.print(f"- {stat}: {stat_count}")
 
     # Keyword arguments to `_export_folder_worker`.
     class _WorkerArgs(TypedDict):
@@ -1836,11 +1868,12 @@ def _export_folders(  # noqa: C901, PLR0912, PLR0915
             TextColumn("{task.fields[status]}"),  # our custom field
         ]
 
+    export_results: dict[str, tuple[GraphFolderT, ExportResult | None]] = {}  # {id:(folder, result)}
+
     with (
         concurrent.futures.ThreadPoolExecutor(max_threads) as executor,
         _logger_friendly_progress(*progress_cols, console=console, logger=logger, disable=not show_progress) as progress,
     ):
-        export_results: dict[str, tuple[GraphFolderT, ExportResult | None]] = {}  # {id:(folder, result)}
         folder_task_id: dict[str, tuple[GraphFolderT, TaskID]] = {}  # {id: (folder,task_id)}
         workers: dict[concurrent.futures.Future[ExportResult], GraphFolderT] = {}
         future_task_id: dict[concurrent.futures.Future[ExportResult], TaskID] = {}
@@ -1933,25 +1966,7 @@ def _export_folders(  # noqa: C901, PLR0912, PLR0915
 
     logger.debug("All worker threads finished.")
 
-    # Output results
-    for folder_and_result in export_results.values():
-        folder, export_result = folder_and_result
-        if export_result and (export_result.messages or export_result.stats):
-            console.print()
-            console.print(f"[bold]'{folder['folderPath']}'[/bold]:")
-
-            for level, messages in export_result.messages.items():
-                for message in messages:
-                    if level == logging.ERROR:
-                        console.print(f"[red]- {message}[/red]")
-                    elif level == logging.WARNING:
-                        console.print(f"[yellow]- {message}[/yellow]")
-                    else:
-                        console.print(f"- {message}")
-
-            if export_result.stats:
-                for stat, stat_count in export_result.stats.items():
-                    console.print(f"- {stat}: {stat_count}")
+    _print_export_results(export_results)
 
     if abort_workers_event.is_set():
         raise typer.Exit(code=1)
