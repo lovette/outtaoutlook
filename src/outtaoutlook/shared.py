@@ -253,6 +253,7 @@ class CommandContext:
 class OutputFormatChoice(StrEnum):
     """Choices for output file format."""
 
+    html = "html"
     json = "json"
     md = "md"
 

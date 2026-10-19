@@ -28,6 +28,7 @@ from requests import sessions
 from rich.progress import BarColumn, Progress, ProgressColumn, SpinnerColumn, Task, TaskID, TextColumn
 from rich.text import Text
 
+from outtaoutlook.output_html import ExportFormatHtml
 from outtaoutlook.output_json import ExportFormatJson
 from outtaoutlook.output_md import ExportFormatMarkdown
 from outtaoutlook.shared import (
@@ -139,6 +140,7 @@ MESSAGE_DATE_FIELDS = ["createdDateTime", "lastModifiedDateTime", "sentDateTime"
 
 EXPORT_MODULES: dict[OutputFormatChoice, type[OutputFormatModule]] = {
     OutputFormatChoice.md: ExportFormatMarkdown,
+    OutputFormatChoice.html: ExportFormatHtml,
     OutputFormatChoice.json: ExportFormatJson,
 }
 
