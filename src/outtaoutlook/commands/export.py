@@ -101,7 +101,7 @@ ATTACHMENT_DEFAULT_SUFFIX = ".bin"
 ATTACHMENT_DEFAULT_NAME = "unnamed"  # suffix will be guessed
 ATTACHMENTS_DEFAULT_FOLDER = "assets"
 ATTACHMENTS_FOLDER_NOTE = "note"
-ATTACHMENTS_FOLDER_VAULT = "vault"
+ATTACHMENTS_FOLDER_ROOT = "root"
 
 # https://learn.microsoft.com/en-us/graph/api/attachment-get
 ATTACHMENT_DATATYPE_FILE = "#microsoft.graph.fileAttachment"
@@ -212,7 +212,7 @@ class ExportOptions:
     place_tags_body_end: bool  # True to place body tags at the end of the note instead the top.
     place_tags_frontmatter: bool  # True to place non-body tags in frontmatter.
     search_query: str | None  # --search criteria from command line and config file.
-    vault_dir: Path  # Root vault directory (set by user.)
+    root_out_dir: Path  # Root output directory (set by user.)
     with_attachments: bool  # Whether to download and link attachments to notes.
 
 
@@ -295,7 +295,7 @@ def _opt_attachments_folder_callback(attachments_folder: str) -> str:
         str: Special keyword, valid folder name or absolute path.
     """
     # Special keywords.
-    if attachments_folder.upper() == ATTACHMENTS_FOLDER_VAULT or attachments_folder.startswith(ATTACHMENTS_FOLDER_NOTE):
+    if attachments_folder.upper() == ATTACHMENTS_FOLDER_ROOT or attachments_folder.startswith(ATTACHMENTS_FOLDER_NOTE):
         return attachments_folder
 
     # Name of subfolder such as "assets" or "attachments".
@@ -315,26 +315,26 @@ def _opt_attachments_folder_callback(attachments_folder: str) -> str:
     raise typer.BadParameter(errmsg)
 
 
-def _opt_vault_dir_callback(vault_dir: str) -> str:
-    """Handle `--vault_dir` command option.
+def _opt_root_out_dir_callback(root_out_dir: str) -> str:
+    """Handle `--outdir` command option.
 
     Args:
-        vault_dir (str): Command line option value.
+        root_out_dir (str): Command line option value.
 
     Returns:
         str: Special keyword, valid folder name or absolute path.
     """
-    if not vault_dir:
+    if not root_out_dir:
         errmsg = "A path to an existing directory is required."
         raise typer.BadParameter(errmsg)
 
     # Absolute or relative path to a directory optionally with ~ or $ENV variables.
-    vault_dir_path = path_with_vars(vault_dir)
-    if not vault_dir_path.is_dir():
-        errmsg = f"Directory '{vault_dir}' does not exist."
+    root_out_dir_path = path_with_vars(root_out_dir)
+    if not root_out_dir_path.is_dir():
+        errmsg = f"Directory '{root_out_dir}' does not exist."
         raise typer.BadParameter(errmsg)
 
-    return str(vault_dir_path)
+    return str(root_out_dir_path)
 
 
 def _opt_metaprop_callback(
@@ -1022,15 +1022,15 @@ def _save_attachments(  # noqa: PLR0913, PLR0917
         export_opts (ExportOptions): Export options.
 
     Returns:
-        list[str]: Paths relative to vault or URIs (file://) for absolute paths.
+        list[str]: Paths relative to root output directory or URIs (file://) for absolute paths.
 
     Raises:
         requests.RequestException derived error (e.g. ConnectionError, JSONDecodeError, HTTPError, etc.)
         OSError derived error (e.g. file system errors, permission errors, etc.)
     """
 
-    def _attachment_rel_links(abs_paths: list[Path], note_dir: Path, vault_dir: Path) -> list[str]:
-        """Convert absolute paths into paths relative to the note directory or the vault.
+    def _attachment_rel_links(abs_paths: list[Path], note_dir: Path, root_out_dir: Path) -> list[str]:
+        """Convert absolute paths into paths relative to the note directory or the root output directory.
 
         For links without a path, Obsidian seems to search:
 
@@ -1048,10 +1048,10 @@ def _save_attachments(  # noqa: PLR0913, PLR0917
             assert abs_path.is_absolute()  # noqa: S101 ; as_uri fails otherwise
             if always_rel:
                 try:
-                    rel_path = str(abs_path.relative_to(vault_dir, walk_up=True))
+                    rel_path = str(abs_path.relative_to(root_out_dir, walk_up=True))
                 except ValueError:
                     rel_path = abs_path.as_uri()
-            elif abs_path.is_relative_to(note_dir) or abs_path.is_relative_to(vault_dir):
+            elif abs_path.is_relative_to(note_dir) or abs_path.is_relative_to(root_out_dir):
                 rel_path = abs_path.name
             else:
                 rel_path = abs_path.as_uri()
@@ -1076,7 +1076,7 @@ def _save_attachments(  # noqa: PLR0913, PLR0917
         if attachment_path:
             attachment_paths.append(attachment_path)
 
-    return _attachment_rel_links(attachment_paths, note_path.parent, export_opts.vault_dir)
+    return _attachment_rel_links(attachment_paths, note_path.parent, export_opts.root_out_dir)
 
 
 def _export_message(  # noqa: C901, PLR0912, PLR0915
@@ -1141,7 +1141,7 @@ def _export_message(  # noqa: C901, PLR0912, PLR0915
 
     def _rel_path_link(rel_path_or_uri: str, *, inline: bool) -> str:
         if rel_path_or_uri.startswith("file://"):
-            # Links external to the vault are normal markdown links
+            # Links external to the root output directory are normal markdown links
             abs_path = Path(rel_path_or_uri[7:])
             return f"[{unquote(abs_path.name)}]({rel_path_or_uri})"
 
@@ -1432,8 +1432,8 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
     if isinstance(export_opts.attachments_folder, Path):
         assert attachments_dir_path.is_dir()  # noqa: S101 ; caller should have verified!
         assert attachments_dir_path.is_absolute()  # noqa: S101 ; caller should have verified!
-    elif export_opts.attachments_folder.upper() == ATTACHMENTS_FOLDER_VAULT:
-        attachments_dir_path = export_opts.vault_dir
+    elif export_opts.attachments_folder.upper() == ATTACHMENTS_FOLDER_ROOT:
+        attachments_dir_path = export_opts.root_out_dir
         attachments_mkdir = False
     elif export_opts.attachments_folder.upper().startswith(ATTACHMENTS_FOLDER_NOTE):  # allow plural "NOTES"
         attachments_dir_path = notes_dir
@@ -2027,18 +2027,18 @@ def _validate_config_file_collection(
 @app.command()
 def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
     ctx: typer.Context,
-    vault_dir: Annotated[
+    out_dir: Annotated[
         Path | None,
         typer.Option(
-            "--vault_dir",
+            "--outdir",
             "-o",
-            exists=False,  # _opt_vault_dir_callback will confirm
+            exists=False,  # _opt_root_out_dir_callback will confirm
             dir_okay=True,
             file_okay=False,
             writable=True,
             metavar="DIRECTORY",
             help="Write output files to this directory. [required]",
-            callback=_opt_vault_dir_callback,
+            callback=_opt_root_out_dir_callback,
             rich_help_panel="Output",
         ),
     ] = None,
@@ -2141,7 +2141,7 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         typer.Option(
             "--not-folder",
             "-n",
-            help="Exclude folder from export; option can be used more than once.",
+            help="Exclude mail folder from export; option can be used more than once.",
             metavar="FOLDER",
             rich_help_panel="Mail folders",
         ),
@@ -2182,8 +2182,8 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
             dir_okay=True,
             file_okay=False,
             writable=True,
-            metavar=f"'{ATTACHMENTS_FOLDER_VAULT}'|'{ATTACHMENTS_FOLDER_NOTE}'|NAME|DIRECTORY",
-            help="Store attachments in the vault, same folder as notes, a subfolder of notes, or another directory.",
+            metavar=f"'{ATTACHMENTS_FOLDER_ROOT}'|'{ATTACHMENTS_FOLDER_NOTE}'|NAME|DIRECTORY",
+            help="Store attachments in the output directory, alongside notes, a subfolder of notes, or another directory.",
             rich_help_panel="Attachments",
             callback=_opt_attachments_folder_callback,
         ),
@@ -2192,7 +2192,7 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         bool,
         typer.Option(
             rich_help_panel="Attachments",
-            help="Create mail folder hierarchy in attachments directory when outside the vault.",
+            help="Create mail folder hierarchy in attachments directory when outside the output directory.",
         ),
     ] = False,
     maxdepth: Annotated[
@@ -2303,8 +2303,8 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         filter_test=filter_test,
     )
 
-    if not vault_dir:
-        errmsg = "Missing option '--vault_dir' / '-o'."
+    if not out_dir:
+        errmsg = "Missing option '--outdir' / '-o'."
         raise typer.BadParameter(errmsg)
     if not (folder or allfolders):
         errmsg = "At least one '--folder' or the '--mailbox' option must be specified."
@@ -2351,13 +2351,13 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         note_body_tags=note_body_tags or None,
         note_metaprop=note_metaprop or None,
         note_tags=note_tags or None,
-        notes_dir=vault_dir,
+        notes_dir=out_dir,
         notes_limit=limit or 0,
         notes_mkdir=notes_mkdir,
         place_tags_body_end=place_tags_body_end,
         place_tags_frontmatter=place_tags_frontmatter,
         search_query=search_query,
-        vault_dir=vault_dir,
+        root_out_dir=out_dir,
         with_attachments=with_attachments,
     )
 
@@ -2367,7 +2367,7 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         if search_query:
             console.print(f"[bold]Testing search criteria for {len(folders)} folders")
     else:
-        console.print(f"Exporting messages from {len(folders)} folders to '{vault_dir}'...")
+        console.print(f"Exporting messages from {len(folders)} folders to '{out_dir}'...")
         logger.debug("Querying Graph API for %d messages at a time", batch_size)
 
     if filter_query:

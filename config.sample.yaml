@@ -51,7 +51,7 @@ ls:
 # You cannot use `search` and `filter` together.
 
 export:
-  vault_dir: "~/Temp/outtaoutlook"
+  out_dir: "~/Temp/outtaoutlook"
 
   allfolders: false
   folder:
