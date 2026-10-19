@@ -52,6 +52,7 @@ ls:
 
 export:
   out_dir: "~/Temp/outtaoutlook"
+  out_format: "md"
 
   allfolders: false
   folder:

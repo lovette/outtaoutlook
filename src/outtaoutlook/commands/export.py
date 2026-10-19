@@ -10,11 +10,8 @@ import mimetypes
 import os
 import re
 import sys
-import textwrap
 import threading
-import unicodedata
 from collections import defaultdict
-from collections.abc import Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -23,17 +20,16 @@ from enum import StrEnum
 from pathlib import Path
 from types import UnionType
 from typing import TYPE_CHECKING, Annotated, Any, Self, TypedDict, get_args
-from urllib.parse import unquote
 
 import requests
 import typer
 import yaml
-from html_to_markdown import ConversionOptions
-from html_to_markdown import convert as convert_to_markdown
 from requests import sessions
 from rich.progress import BarColumn, Progress, ProgressColumn, SpinnerColumn, Task, TaskID, TextColumn
 from rich.text import Text
 
+from outtaoutlook.output_json import ExportFormatJson
+from outtaoutlook.output_md import ExportFormatMarkdown
 from outtaoutlook.shared import (
     APP_NAME,
     AUTH_ERROR_USECOMMAND,
@@ -42,7 +38,11 @@ from outtaoutlook.shared import (
     GRAPH_API_URL,
     GRAPH_MESSAGE_FIELDS_SET,
     MAILBOX_ROOT,
+    TITLE_UNTITLED,
     CommandContext,
+    ExportOptions,
+    ExportStat,
+    ExportStatsT,
     FileMetaPropT,
     GraphApiConfig,
     GraphApiError,
@@ -51,29 +51,30 @@ from outtaoutlook.shared import (
     GraphAuthRequiredError,
     GraphFolderT,
     GraphMessageT,
+    OutputFormatChoice,
     console,
     datetime_now,
     err_console,
+    exportstat_incr,
     get_graph_config,
     get_hash_filename,
     graph_get_resource,
     graph_resolve_folder_paths,
+    log_message_notice,
     path_with_vars,
     print_graph_request_exception,
+    safe_file_name,
+    unique_file_path,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Generator
 
+    from outtaoutlook.output_protocol import OutputFormatModule
+
 app = typer.Typer(add_completion=False)
 logger = logging.getLogger(APP_NAME)  # initialized in __main__
 
-# There is a gap of time between a unique path name being generated
-# and the file is actually created on disk.
-# Therefore we need a way to reserve unique paths that is coordinated between all threads.
-# We do this by keeping a set of unique paths and a lock to coordinate access.
-# dict[path.parent]=(set(path.name), lock)
-unique_out_path_locks: dict[Path, tuple[set[str], threading.Lock]] = defaultdict(lambda: (set(), threading.Lock()))
 
 # Thread-local storage for per-thread data.
 thread_local_data = threading.local()
@@ -91,8 +92,6 @@ abort_workers_event = threading.Event()
 ######################################################################
 # Constants
 
-TITLE_UNTITLED = "Untitled"
-TITLE_MAXLEN = 255 - 25  # macOS limit minus a few characters for whatever `_unique_out_path` tacks on
 MIN_PROGRESS_THRESHOLD = 10  # Hide progress if only a few messages
 FIRST_BATCH_COMPLETE_EVENT_WAIT = 60  # seconds; just a failsafe, I don't expect there to be any deadlocking :)
 FOLDER_ICON = "\N{OPEN FILE FOLDER}\N{NARROW NO-BREAK SPACE}"
@@ -118,19 +117,8 @@ MESSAGE_DATATYPE_EVENT_MESSAGE_SET = {
     MESSAGE_DATATYPE_EVENT_MESSAGE_RESPONSE,
 }
 
-# These are banned outright: \/:
-# Links do not work if title includes: #^[]|
-# macOS is fine with: *"<>?
-# Title cannot start with a period.
-# \x00-\x1f\x7f = [:cntrl:]
-RE_TITLE_IGNORECHARS = re.compile(r"[\[\]\/\\:|^#\x00-\x1f\x7f]")
-RE_TITLE_WHITESPACE = re.compile(r"\s+")
-
 # Simple detection if filter/search critera contain 'and' or 'or' conditions.
 RE_AND_OR = re.compile(r"\s(and|or)\s", re.IGNORECASE)
-
-# Tag and property variables in the format '{tag.propertyName}'
-RE_TAG_VAR = re.compile(r"{[a-zA-Z.]+}")
 
 # Message fields we reference for exporting
 EXPORT_MESSAGE_FIELDS = [
@@ -149,6 +137,12 @@ EXPECTED_MESSAGE_FIELDS_SET = GRAPH_MESSAGE_FIELDS_SET | {"@odata.etag"}
 MESSAGE_DATE_FIELDS = ["createdDateTime", "lastModifiedDateTime", "sentDateTime", "receivedDateTime"]
 
 
+EXPORT_MODULES: dict[OutputFormatChoice, type[OutputFormatModule]] = {
+    OutputFormatChoice.md: ExportFormatMarkdown,
+    OutputFormatChoice.json: ExportFormatJson,
+}
+
+
 ######################################################################
 # Configure YAML to understand Decimal type
 
@@ -163,60 +157,12 @@ yaml.SafeDumper.add_representer(Decimal, _yaml_represent_decimal)
 ######################################################################
 # Types and classes
 
-FrontmatterT = dict[str, str | int | Decimal | bool | Sequence[str | int]]
-
-
-class ExportError(GraphApiError):
-    """Export failure."""
-
 
 class FilterJoinCond(StrEnum):
     """Choices for joining filter conditions."""
 
     cond_and = "and"
     cond_or = "or"
-
-
-class ExportStat(StrEnum):
-    """Export statistic messages."""
-
-    STAT_FILE_CREATED = "Files created"
-    STAT_ATTACHMENT_LINKED = "Attachments linked"
-    STAT_SKIPPED_DUPLICATE = "Skipped; Message already exported"
-    STAT_SKIPPED_MARKDOWN_CONVERSION_FAILED = "Skipped; Markdown conversion failed"
-    STAT_SKIPPED_NO_MESSAGE_BODY = "Skipped; No message body"
-    STAT_SKIPPED_NO_MESSAGE_CONTENT_JUST_ATTACHMENTS = "Skipped; No file content, just attachments (not being saved)"
-    STAT_SKIPPED_NO_MESSAGE_CONTENT_NO_ATTACHMENTS = "Skipped; No file content"
-    STAT_SKIPPED_NO_MESSAGE_CONTENT_UNKNOWN = "Skipped; No file content, unknown reason"
-    STAT_SKIPPED_EVENT_MESSAGE = "Skipped; Calendar event"
-
-
-@dataclass
-class ExportOptions:
-    """Export command options."""
-
-    attachments_folder: str | Path  # `ATTACHMENTS_FOLDER_*`, folder name or absolute path.
-    attachments_mkdir: bool  # Create mail folder hierarchy in attachments directory.
-    batch_size: int  # Number of messages to process in a batch.
-    dry_run: bool  # Whether to perform a dry run without making any changes.
-    filter_query: str | None  # --filter criteria from command line and config file.
-    filter_test: bool  # Whether to perform a filter test without exporting.
-    manifest_dir: Path | None  # Directory to write the manifest file.
-    mkdir_maxdepth: int | None  # Maximum depth (from the leaf) of folder tree to create when creating mail folder hierarchy.
-    md_body_tags: list[str] | None  # --body-tag tags from command line and config file.
-    md_metaprop: FileMetaPropT | None  # --metaprop properties from command line and config file.
-    md_tags: list[str] | None  # --tag tags from command line and config file.
-    files_dir: Path  # Directory to save files (set internally.)
-    files_limit: int  # Maximum number of files to export (per folder).
-    files_mkdir: bool  # Create mail folder hierarchy in files directory.
-    md_place_tags_body_end: bool  # True to place body tags at the end of the file instead the top.
-    md_place_tags_frontmatter: bool  # True to place non-body tags in frontmatter.
-    search_query: str | None  # --search criteria from command line and config file.
-    root_out_dir: Path  # Root output directory (set by user.)
-    with_attachments: bool  # Whether to download and link attachments to files.
-
-
-ExportStatsT = dict[ExportStat, int]
 
 
 @dataclass
@@ -274,17 +220,6 @@ def _logger_friendly_progress(*args, **kwargs) -> Generator[Progress]:  # noqa: 
                 handler.setStream(prior_stderr)
 
 
-def _exportstat_incr(export_stats: ExportStatsT, stat: ExportStat, incr: int = 1) -> None:
-    """Increment specified export stat.
-
-    Args:
-        export_stats (ExportStatsT): Export stats dictionary.
-        stat (ExportStat): Stat to increment.
-        incr (int, optional): Increment amount. Defaults to 1.
-    """
-    export_stats[stat] = export_stats.get(stat, 0) + incr
-
-
 def _opt_attachments_folder_callback(attachments_folder: str) -> str:
     """Handle `--attachments-folder` command option.
 
@@ -300,7 +235,7 @@ def _opt_attachments_folder_callback(attachments_folder: str) -> str:
 
     # Name of subfolder such as "assets" or "attachments".
     if len(Path(attachments_folder).parts) == 1:
-        if attachments_folder != _safe_title(attachments_folder, ""):
+        if attachments_folder != safe_file_name(attachments_folder, ""):
             errmsg = f"'{attachments_folder}' is not a valid attachments directory name."
             raise typer.BadParameter(errmsg)
 
@@ -411,90 +346,6 @@ def _merge_metaprops(a: FileMetaPropT, b: FileMetaPropT | None) -> FileMetaPropT
     return c
 
 
-def _log_message_notice(message: GraphMessageT, errmsg: str, level: int = logging.WARNING) -> None:
-    """Log a warning related to a message.
-
-    Args:
-        message (GraphMessageT): Message object.
-        errmsg (str): Warning description.
-        level (int): Logging level code (e.g., logging.WARNING).
-    """
-    logger.log(level, 'message("%s"): %s', message["subject"], errmsg)
-
-
-def _safe_title(subject: str, default: str) -> str:
-    """Clean up title so it is safe to be used as a file name.
-
-    Args:
-        subject (str): Message subject.
-        default (str): Default title if subject is empty.
-
-    Returns:
-        str
-    """
-    subject = subject.replace(":", " ")  # Common separator so we'll replace it with a safe character.
-    subject = RE_TITLE_IGNORECHARS.sub("", subject)
-    subject = RE_TITLE_WHITESPACE.sub(" ", subject)
-
-    if len(subject) > TITLE_MAXLEN:
-        # Truncate text while preserving whole words if possible
-        subject = textwrap.shorten(subject, width=TITLE_MAXLEN, placeholder="")
-
-    subject = subject.strip(" .")
-
-    return subject or default
-
-
-def _unique_out_path(p: Path, date_hint: datetime | None = None) -> Path:
-    """Create a Path with unique file name, optionally using a date hint.
-
-    Args:
-        p (Path): Existing path.
-        date_hint (datetime | None): Optional datetime to include in the filename for uniqueness.
-
-    Raises:
-        ExportError: Raised if too many copies of the file already exist.
-
-    Returns:
-        Path: Unique path with a non-conflicting file name.
-    """
-
-    def _get_unique_path(p_base: Path) -> Path | None:
-        n = 1
-        unique_path = p_base
-
-        while n < max_paths:
-            exists = (unique_path.name in path_names_set) or unique_path.exists()
-            path_names_set.add(unique_path.name)
-            if not exists:
-                return unique_path
-            unique_path = p_base.with_stem(f"{p_base.stem} ({n})")
-            n += 1
-
-        return None
-
-    # Keep in mind we need to keep the final filename within TITLE_MAXLEN characters.
-
-    max_paths = 10000
-    path_names_set, path_names_lock = unique_out_path_locks[p.parent]
-
-    with path_names_lock:
-        unique_path = _get_unique_path(p)
-        if unique_path:
-            return unique_path
-
-    if date_hint:
-        # Try using the date hint to create a unique filename.
-        p = p.with_stem(f"{p.stem} {date_hint:%Y%m%d%H%M%S}")
-        with path_names_lock:
-            unique_path = _get_unique_path(p)
-            if unique_path:
-                return unique_path
-
-    errmsg = f"{max_paths} copies of '{p}' already exist?!"
-    raise ExportError(errmsg)
-
-
 def _coerce_datetime(dt: str | None) -> datetime | None:
     """Convert a datetime string in ISO format into a `datetime` object.
 
@@ -511,273 +362,6 @@ def _coerce_datetime(dt: str | None) -> datetime | None:
         return datetime.fromisoformat(dt)
     except ValueError:
         return None
-
-
-def _clean_tags(tags: list[str]) -> list[str]:
-    """Normalize tags to follow rules Obsidian defines.
-
-    https://obsidian.md/help/tags
-
-    Args:
-        tags (list[str]): List of tags.
-
-    Returns:
-        list[str]: Updated list of tags.
-    """
-    for i, _tag in enumerate(tags):
-        tag = _tag.strip()
-
-        if " " in tag:
-            tag = tag.title().replace(" ", "")
-
-        tag = "".join(
-            # Thanks Gemini
-            char
-            for char in tag
-            if unicodedata.category(char)[0] in "LNMS" or char in "_-/\u200d"
-        )
-
-        if tag.isdecimal():
-            tag = f"_{tag}"
-
-        tags[i] = tag
-
-    return tags
-
-
-def _expand_vars_dict(d: FileMetaPropT, prop_vars: dict[str, str]) -> FileMetaPropT:
-    """Expand dynamic variable references in a dictionary of metadata properties.
-
-    Args:
-        d (FileMetaPropT): Dictionary of properties to expand.
-        prop_vars (dict[str, str]): Dictionary of replacement patterns.
-
-    Returns:
-        FileMetaPropT: Updated dictionary with message-related placeholders expanded.
-    """
-
-    def _varrepl(m: re.Match) -> str:
-        var_name: str = m.group(0)
-        return prop_vars.get(var_name, var_name)
-
-    if not d:
-        return {}
-
-    d = d.copy()  # don't modify caller
-
-    for key, value in d.items():
-        if isinstance(value, str):
-            d[key] = RE_TAG_VAR.sub(_varrepl, value)
-
-    return d
-
-
-def _expand_vars_list(lst: list[str], prop_vars: dict[str, str]) -> list[str]:
-    """Expand dynamic variable references in a list of tags.
-
-    Args:
-        lst (list[str]): List of tags or metadata properties to expand.
-        prop_vars (dict[str, str]): Dictionary of replacement patterns.
-
-    Returns:
-        list[str]: New list with dynamic placeholders expanded.
-    """
-
-    def _varrepl(m: re.Match) -> str:
-        var_name: str = m.group(0)
-        return prop_vars.get(var_name, var_name)
-
-    if not lst:
-        return []
-
-    return [RE_TAG_VAR.sub(_varrepl, _tag) for _tag in lst]
-
-
-def _expand_folder_tags(
-    folder: GraphFolderT,
-    tags: list[str] | None,
-    tag_vars: dict[str, str],
-) -> list[str] | None:
-    """Expand folder related tags.
-
-    Args:
-        folder (GraphFolderT): Folder object.
-        tags (list[str] | None): List of tags to expand.
-        tag_vars (dict[str, str]): Dictionary of replacement patterns.
-
-    Returns:
-        list[str] | None: Updated list of tags with folder-related placeholders expanded.
-    """
-    if not tags:
-        return None
-
-    tags = _expand_vars_list(tags, tag_vars)
-
-    add_tags: list[str] = []
-    remove_tags: set[int] = set()
-
-    # Expand placeholders
-    for i, tag in enumerate(tags):
-        if "{folder.folderPath.parts}" in tag:
-            add_tags.extend(part for part in Path(folder["folderPath"]).parts)
-            remove_tags.add(i)  # remove placeholder from list
-
-    if remove_tags:
-        tags = [tag for i, tag in enumerate(tags) if i not in remove_tags]
-    if add_tags:
-        tags.extend(add_tags)
-
-    return tags
-
-
-def _expand_folder_metaprop(
-    folder: GraphFolderT,
-    metaprop: FileMetaPropT | None,
-    prop_vars: dict[str, str],
-) -> FileMetaPropT | None:
-    """Expand folder related metadata properties.
-
-    Args:
-        folder (GraphFolderT): Folder object.
-        metaprop (MetaPropT | None): Dictionary of metadata to expand.
-        prop_vars (dict[str, str]): Dictionary of replacement patterns.
-
-    Returns:
-        MetaPropT | None: Updated dictionary of metadata with folder-related placeholders expanded.
-
-    Raises:
-        ValueError
-    """
-    if not metaprop:
-        return None
-
-    metaprop = _expand_vars_dict(metaprop, prop_vars)
-
-    for name, value in metaprop.items():
-        if isinstance(value, str) and "{folder.folderPath.parts}" in value:
-            # Frontmatter can include list types so we can simply pass it along
-            path_parts = Path(folder["folderPath"]).parts
-            metaprop[name] = path_parts[0] if len(path_parts) == 1 else path_parts
-
-    return metaprop
-
-
-def _init_file_frontmatter(metaprop: FileMetaPropT | None, prop_vars: dict[str, str]) -> FrontmatterT:
-    """Initialize file frontmatter with expanded metadata properties.
-
-    Args:
-        metaprop (FileMetaPropT | None): Dictionary of metadata properties to expand.
-        prop_vars (dict[str, str]): Dictionary of replacement patterns.
-
-    Returns:
-        FrontmatterT: Initialized frontmatter dictionary.
-    """
-
-    def is_float(value: str) -> bool:
-        try:
-            float(value)
-        except ValueError:
-            return False
-        return True
-
-    frontmatter: FrontmatterT = {}
-
-    metaprop = _expand_vars_dict(metaprop or {}, prop_vars)
-
-    # Properties support some scalar types
-    for key, value in metaprop.items():
-        if not isinstance(value, str):
-            frontmatter[key] = value
-        elif value.isdecimal():
-            frontmatter[key] = int(value)
-        elif "." in value and is_float(value):
-            frontmatter[key] = Decimal(value)
-        elif value.lower() in ("true", "false"):
-            frontmatter[key] = value.lower() == "true"
-        else:
-            frontmatter[key] = value
-
-    return frontmatter
-
-
-def _append_md_tags(
-    file_content: str,
-    export_opts: ExportOptions,
-    tag_vars: dict[str, str],
-    frontmatter: FrontmatterT,
-) -> str:
-    """Append tags to file content and/or frontmatter.
-
-    Args:
-        file_content (str): File content.
-        export_opts (ExportOptions): Export options.
-        tag_vars (dict[str, str]): Dictionary of replacement patterns.
-        frontmatter (FrontmatterT): Frontmatter dictionary. Frontmatter tags will be added here if applicable.
-
-    Returns:
-        str
-    """
-    body_tags = _expand_vars_list(export_opts.md_body_tags or [], tag_vars)
-    frontmatter_tags = _expand_vars_list(export_opts.md_tags or [], tag_vars)
-
-    if not export_opts.md_place_tags_frontmatter:
-        # Place all tags in body
-        body_tags.extend(frontmatter_tags)
-        frontmatter_tags = []
-
-    # Format as valid tags
-    body_tags = _clean_tags(body_tags)
-    frontmatter_tags = _clean_tags(frontmatter_tags)
-
-    # Remove duplicates while keeping order
-    body_tags = list(dict.fromkeys(body_tags))
-    frontmatter_tags = list(dict.fromkeys(frontmatter_tags))
-
-    if frontmatter_tags:
-        frontmatter["tags"] = frontmatter_tags  # modifies caller
-
-    if body_tags:
-        tag_block = " ".join(f"#{tag}" for tag in body_tags)
-
-        if export_opts.md_place_tags_body_end:
-            file_content += "\n\n" + tag_block
-        else:
-            file_content = tag_block + "\n\n" + file_content
-
-    return file_content
-
-
-def _convert_to_markdown(body_content: str) -> str | None:
-    """Convert message content to Markdown.
-
-    Args:
-        body_content (str): The HTML body content of the message.
-
-    Returns:
-        str|None: File content or None if message has no body or Markdown conversion fails.
-    """
-    # https://github.com/matthewwithanm/python-markdownify
-    # from markdownify import markdownify as html_to_md
-    # file_content = html_to_md(body_content)
-
-    # https://github.com/xberg-io/html-to-markdown
-    # https://pypi.org/project/html-to-markdown/
-    # https://docs.html-to-markdown.xberg.io/reference/api-python/
-
-    # Disable metadata extraction to prevent Microsoft Word custom <meta> tags from being added to the frontmatter.
-    # I couldn't find a way to parse it and suppress the frontmatter altogether :/
-    # Everything is escaped presuming emails aren't meant to include Markdown entities, such as hashtags.
-    opts = ConversionOptions(
-        extract_metadata=False,
-        escape_ascii=True,
-        escape_asterisks=True,
-        escape_misc=True,
-        escape_underscores=True,
-    )
-
-    convert_result = convert_to_markdown(body_content, opts)
-
-    return convert_result.content
 
 
 def _list_messages(
@@ -859,7 +443,7 @@ def _get_attachment_content(  # noqa: C901
     """
 
     def _warn_attachment(name: Path, errmsg: str, level: int = logging.WARNING) -> None:
-        _log_message_notice(message, f'attachment("{name}"): {errmsg}', level)
+        log_message_notice(message, f'attachment("{name}"): {errmsg}', level)
 
     def _get_item_expanded_content() -> tuple[dict[str, Any], str | None]:
         # Get properties of the attached contact, event, or message.
@@ -902,7 +486,7 @@ def _get_attachment_content(  # noqa: C901
 
         return content, content_type
 
-    name = Path(_safe_title(attachment.get("name", ""), ATTACHMENT_DEFAULT_NAME))
+    name = Path(safe_file_name(attachment.get("name", ""), ATTACHMENT_DEFAULT_NAME))
     data_suffix = name.suffix or None
 
     # We require every attachment to have a suffix.
@@ -981,7 +565,7 @@ def _save_attachment(  # noqa: PLR0913, PLR0917
     assert isinstance(export_opts.attachments_folder, Path)  # noqa: S101
     assert export_opts.attachments_folder.is_absolute()  # noqa: S101
 
-    attachment_path = _unique_out_path(export_opts.attachments_folder / Path(attachment["name"]), file_date)
+    attachment_path = unique_file_path(export_opts.attachments_folder / Path(attachment["name"]), file_date)
 
     if export_opts.dry_run:
         logger.debug("Wrote attachment to '%s' (%s) (dry run)", attachment_path.name, content_type)
@@ -994,7 +578,7 @@ def _save_attachment(  # noqa: PLR0913, PLR0917
                 f.write(base64.b64decode(content))
             logger.debug("Wrote attachment to '%s' (%s)", attachment_path.name, content_type)
         except binascii.Error as err:
-            _log_message_notice(message, f'attachment("{attachment_path.name}"): b64decode failed: {err}', logging.ERROR)
+            log_message_notice(message, f'attachment("{attachment_path.name}"): b64decode failed: {err}', logging.ERROR)
             return None
 
     if attachment_path.is_file():
@@ -1007,59 +591,27 @@ def _save_attachments(  # noqa: PLR0913, PLR0917
     session: sessions.Session,
     graph_config: GraphApiConfig,
     message: GraphMessageT,
-    file_path: Path,
+    attachment_name_prefix: str,
     file_date: datetime,
     export_opts: ExportOptions,
-) -> list[str]:
+) -> list[Path]:
     """Save message attachments to the local filesystem.
 
     Args:
         session (sessions.Session): The requests session to pool requests.
         graph_config (GraphApiConfig): Graph API configuration.
         message (GraphMessageT): Message properties.
-        file_path (Path): The path to the file file.
+        attachment_name_prefix (str): The prefix for attachment file names.
         file_date (datetime): The date of the file.
         export_opts (ExportOptions): Export options.
 
     Returns:
-        list[str]: Paths relative to root output directory or URIs (file://) for absolute paths.
+        list[Path]: Paths relative to root output directory or URIs (file://) for absolute paths.
 
     Raises:
         requests.RequestException derived error (e.g. ConnectionError, JSONDecodeError, HTTPError, etc.)
         OSError derived error (e.g. file system errors, permission errors, etc.)
     """
-
-    def _attachment_rel_links(abs_paths: list[Path], file_dir: Path, root_out_dir: Path) -> list[str]:
-        """Convert absolute paths into paths relative to the file directory or the root output directory.
-
-        For links without a path, Obsidian seems to search:
-
-        1. Note folder
-        2. Note subfolders
-        3. Vault root
-        4. Vault subfolders, alphabetically
-
-        Outside the note directory and vault, use a file URI.
-        """
-        always_rel = False
-        rel_paths: list[str] = []
-
-        for abs_path in abs_paths:
-            assert abs_path.is_absolute()  # noqa: S101 ; as_uri fails otherwise
-            if always_rel:
-                try:
-                    rel_path = str(abs_path.relative_to(root_out_dir, walk_up=True))
-                except ValueError:
-                    rel_path = abs_path.as_uri()
-            elif abs_path.is_relative_to(file_dir) or abs_path.is_relative_to(root_out_dir):
-                rel_path = abs_path.name
-            else:
-                rel_path = abs_path.as_uri()
-
-            rel_paths.append(rel_path)
-
-        return rel_paths
-
     attachment_paths: list[Path] = []
 
     for attachment in _list_attachments(session, graph_config, message):
@@ -1068,7 +620,7 @@ def _save_attachments(  # noqa: PLR0913, PLR0917
             graph_config,
             message,
             attachment,
-            file_path.stem,
+            attachment_name_prefix,
             file_date,
             export_opts,
         )
@@ -1076,13 +628,14 @@ def _save_attachments(  # noqa: PLR0913, PLR0917
         if attachment_path:
             attachment_paths.append(attachment_path)
 
-    return _attachment_rel_links(attachment_paths, file_path.parent, export_opts.root_out_dir)
+    return attachment_paths
 
 
-def _export_message(  # noqa: C901, PLR0912, PLR0915
+def _export_message(  # noqa: PLR0913, PLR0917
     session: sessions.Session,
     graph_config: GraphApiConfig,
     message: GraphMessageT,
+    output_module: OutputFormatModule,
     export_opts: ExportOptions,
     export_stats: ExportStatsT,
 ) -> None:
@@ -1092,8 +645,9 @@ def _export_message(  # noqa: C901, PLR0912, PLR0915
         session (sessions.Session): The requests session to pool requests.
         graph_config (GraphApiConfig): Graph API configuration.
         message (GraphMessageT): The message.
+        output_module (OutputFormatModule): The output module to use for exporting.
         export_opts (ExportOptions): Export options.
-        export_stats (ExportStatsDict): Export statistics dictionary to update.
+        export_stats (ExportStatsT): Export statistics dictionary to update.
 
     Raises:
         requests.RequestException derived error (e.g. ConnectionError, JSONDecodeError, HTTPError, etc.)
@@ -1109,13 +663,13 @@ def _export_message(  # noqa: C901, PLR0912, PLR0915
 
             if not dt:
                 if date_field not in message:
-                    _log_message_notice(message, f"field({date_field}): missing date field")
+                    log_message_notice(message, f"field({date_field}): missing date field")
                 elif is_draft and date_field in {"sentDateTime", "receivedDateTime"}:
                     pass  # Drafts aren't expected to have sent or received dates, we'll set something below
                 elif value:
-                    _log_message_notice(message, f"field({date_field}): unexpected date format: '{value}'")
+                    log_message_notice(message, f"field({date_field}): unexpected date format: '{value}'")
                 else:
-                    _log_message_notice(message, f"field({date_field}): no value")
+                    log_message_notice(message, f"field({date_field}): no value")
 
             # Ensure all fields are set to a valid datetime
             message[date_field] = dt or dt_now
@@ -1139,24 +693,13 @@ def _export_message(  # noqa: C901, PLR0912, PLR0915
             message["receivedDateTime"],
         )
 
-    def _rel_path_link(rel_path_or_uri: str, *, inline: bool) -> str:
-        if rel_path_or_uri.startswith("file://"):
-            # Links external to the root output directory are normal markdown links
-            abs_path = Path(rel_path_or_uri[7:])
-            return f"[{unquote(abs_path.name)}]({rel_path_or_uri})"
-
-        return f"![[{rel_path_or_uri}]]" if inline else f"[[{rel_path_or_uri}]]"
-
     subject: str = message.get("subject") or TITLE_UNTITLED
-    title = _safe_title(subject, TITLE_UNTITLED)
+    title = safe_file_name(subject, TITLE_UNTITLED)
     is_draft: bool | None = message.get("isDraft")
-    body_content: str | None = message.get("body", {}).get("content")
-    content_type: str | None = message.get("body", {}).get("contentType")
     has_attachments: bool | None = message.get("hasAttachments")
-    dt_now = datetime_now()
-    file_body = body_content
     data_type: str | None = message.get("@odata.type")
     is_calendar_related = data_type and data_type in MESSAGE_DATATYPE_EVENT_MESSAGE_SET
+    attachment_paths: list[Path] | None = None
 
     _fix_dates(message, bool(is_draft))
 
@@ -1164,112 +707,40 @@ def _export_message(  # noqa: C901, PLR0912, PLR0915
     if is_draft:
         file_date = message["lastModifiedDateTime"] or message["createdDateTime"]
 
-    if body_content:
-        if is_calendar_related:
-            pass  # Calendar requests and responses are skipped
-        elif content_type == "html":
-            file_body = _convert_to_markdown(body_content)
-        elif content_type != "text":
-            _log_message_notice(message, f"field('contentType'): unexpected type: '{content_type}'")
+    message["subject"] = subject
+    message["fileTitle"] = title  # custom property
+    message["messageDateTime"] = file_date  # custom property
 
-    if not file_body or is_calendar_related:
-        skip_reason, level = None, logging.INFO
+    if is_calendar_related:
+        # Calendar requests and responses are skipped
+        skip_reason, level = ExportStat.STAT_SKIPPED_EVENT_MESSAGE, logging.DEBUG
+        exportstat_incr(export_stats, skip_reason)
+        log_message_notice(message, skip_reason.value, level)
+        return  # don't write empty files
 
-        if is_calendar_related:
-            skip_reason, level = ExportStat.STAT_SKIPPED_EVENT_MESSAGE, logging.DEBUG
-        elif body_content is None:
-            skip_reason, level = ExportStat.STAT_SKIPPED_NO_MESSAGE_BODY, logging.WARNING
-        elif file_body is None:
-            skip_reason, level = ExportStat.STAT_SKIPPED_MARKDOWN_CONVERSION_FAILED, logging.WARNING
-        elif has_attachments and export_opts.with_attachments:
-            pass  # export attachments
-        elif not has_attachments:
-            skip_reason, level = ExportStat.STAT_SKIPPED_NO_MESSAGE_CONTENT_NO_ATTACHMENTS, logging.INFO
-        elif not export_opts.with_attachments:
-            skip_reason, level = ExportStat.STAT_SKIPPED_NO_MESSAGE_CONTENT_JUST_ATTACHMENTS, logging.INFO
-        else:
-            skip_reason, level = ExportStat.STAT_SKIPPED_NO_MESSAGE_CONTENT_UNKNOWN, logging.ERROR
+    file_path = output_module.get_file_path(message, export_opts)
 
-        if skip_reason:
-            _exportstat_incr(export_stats, skip_reason)
-            _log_message_notice(message, skip_reason.value, level)
-            return  # don't write empty files
-
-        file_body = ""  # content will be links to attachments
-
-    tag_vars = {}
-
-    # Dynamic variables that can be referenced in tags.
-    # {now.[datetime|date|time|year]}
-    # {message.[date|sent|received|created|modified].[datetime|date|time|year]}
-    for var_name, dt in (
-        ("now", dt_now),
-        ("message.date", file_date),
-        ("message.created", message["createdDateTime"]),
-        ("message.modified", message["lastModifiedDateTime"]),
-        ("message.received", message["receivedDateTime"]),
-        ("message.sent", message["sentDateTime"]),
-    ):
-        tag_vars[f"{{{var_name}.datetime}}"] = dt.strftime("%Y-%m-%dT%H:%M:%S")
-        tag_vars[f"{{{var_name}.date}}"] = dt.strftime("%Y-%m-%d")
-        tag_vars[f"{{{var_name}.time}}"] = dt.strftime("%H:%M:%S")
-        tag_vars[f"{{{var_name}.year}}"] = f"{dt.year}"
-
-    # Dynamic variables that can be referenced in metadata properties.
-    metaprop_vars = tag_vars | {
-        "{file.title}": title,
-        "{message.subject}": subject,
-    }
-
-    file_content: list[str] = []
-    attachment_links: list[str] = []
-    file_path = _unique_out_path(export_opts.files_dir / Path(title + ".md"), file_date)
-
-    # Save attachments and get links to them
+    # Save attachments
     if has_attachments and export_opts.with_attachments:
         attachment_paths = _save_attachments(
             session,
             graph_config,
             message,
-            file_path,
+            file_path.stem,
             file_date,
             export_opts,
         )
 
-        inline = len(attachment_paths) == 1 and not file_body  # File consists of a single inline link
-        attachment_links = [_rel_path_link(rel_path_or_uri, inline=inline) for rel_path_or_uri in attachment_paths]
+        exportstat_incr(export_stats, ExportStat.STAT_ATTACHMENT_SAVED, len(attachment_paths))
 
-        _exportstat_incr(export_stats, ExportStat.STAT_ATTACHMENT_LINKED, len(attachment_paths))
-
-    frontmatter = _init_file_frontmatter(export_opts.md_metaprop, metaprop_vars)
-
-    file_body = _append_md_tags(file_body, export_opts, tag_vars, frontmatter)
-
-    if frontmatter:
-        # Frontmatter goes first
-        file_content = [
-            "---",
-            yaml.safe_dump(frontmatter, sort_keys=False).strip(),
-            "---",
-            *file_content,
-        ]
-
-    if attachment_links:
-        file_content.extend(attachment_links)
-        file_content.append("")  # blank line
-
-    # File body goes last
-    file_content.append(file_body)
-
-    if not export_opts.dry_run:
-        file_text = "\n".join(file_content).strip() + "\n"
-        file_path.write_text(file_text, encoding="utf-8")
-        os.utime(file_path, (file_date.timestamp(), file_date.timestamp()))
-        logger.debug("Wrote file to '%s'", file_path.name)
-    else:
-        logger.debug("Wrote file to '%s' (dry run)", file_path.name)
-
-    _exportstat_incr(export_stats, ExportStat.STAT_FILE_CREATED)
+    # Export the message in specified format.
+    output_module.export_message(
+        message,
+        file_path,
+        attachment_paths,
+        export_opts,
+        export_stats,
+    )
 
 
 def _export_folder_batch(  # noqa: PLR0913, PLR0917
@@ -1282,6 +753,7 @@ def _export_folder_batch(  # noqa: PLR0913, PLR0917
     params: dict[str, str | int] | None,
     batch_limit: int,
     exported_ids: set[str],
+    output_module: OutputFormatModule,
     export_opts: ExportOptions,
     export_stats: ExportStatsT,
 ) -> tuple[int, str | None]:
@@ -1297,8 +769,9 @@ def _export_folder_batch(  # noqa: PLR0913, PLR0917
         params (dict[str, str | int] | None): The query parameters for the API request.
         batch_limit (int): The maximum number of messages to export in this batch.
         exported_ids (set[str]): The set of message IDs that have already been exported. Modified in-place.
+        output_module (OutputFormatModule): The output module to use for exporting.
         export_opts (ExportOptions): Options for exporting messages.
-        export_stats (ExportStats): Export statistics dictionary to update.
+        export_stats (ExportStatsT): Export statistics dictionary to update.
 
     Returns:
         tuple[int, str | None]: [Number of messages exported in this batch (including dups),
@@ -1323,13 +796,14 @@ def _export_folder_batch(  # noqa: PLR0913, PLR0917
                 session,
                 graph_config,
                 message,
+                output_module,
                 export_opts,
                 export_stats,
             )
 
             exported_ids.add(message["id"])
         else:
-            _exportstat_incr(export_stats, ExportStat.STAT_SKIPPED_DUPLICATE)
+            exportstat_incr(export_stats, ExportStat.STAT_SKIPPED_DUPLICATE)
 
         progress.update(progress_task_id, advance=1)
 
@@ -1346,6 +820,7 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
     progress: Progress,
     progress_task_id: TaskID,
     graph_config: GraphApiConfig,
+    output_module: OutputFormatModule,
     export_opts: ExportOptions,
 ) -> ExportResult:
     """Export messages from a specific folder to the output directory.
@@ -1356,6 +831,7 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         progress (Progress): The progress tracker for the export operation.
         progress_task_id (TaskID): The task ID for the progress tracker.
         graph_config (GraphApiConfig): Graph API configuration.
+        output_module (OutputFormatModule): The output module to use for exporting.
         export_opts (ExportOptions): Options for exporting messages.
 
     Returns:
@@ -1439,7 +915,7 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         attachments_dir_path = files_dir
         attachments_mkdir = False
     elif not attachments_dir_path.is_absolute():
-        attachments_dir_path = files_dir / _safe_title(export_opts.attachments_folder, ATTACHMENTS_DEFAULT_FOLDER)
+        attachments_dir_path = files_dir / safe_file_name(export_opts.attachments_folder, ATTACHMENTS_DEFAULT_FOLDER)
         attachments_mkdir = False
 
     if attachments_mkdir:
@@ -1457,21 +933,14 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
             _emit_log(f"Saving attachments to '{attachments_dir_path}'")
             _mkdir(attachments_dir_path, "attachments", parents=attachments_mkdir)
 
-    # Dynamic variables that can be referenced in tags and metadata properties.
-    folder_tag_vars = {
-        "{folder.displayName}": folder["displayName"],
-        "{folder.folderPath}": folder["folderPath"],
-    }
-
     # Tweak export options without modifying caller
     export_opts = copy.replace(
         export_opts,
         files_dir=files_dir,
         attachments_folder=attachments_dir_path,
-        md_tags=_expand_folder_tags(folder, export_opts.md_tags, folder_tag_vars),
-        md_body_tags=_expand_folder_tags(folder, export_opts.md_body_tags, folder_tag_vars),
-        md_metaprop=_expand_folder_metaprop(folder, export_opts.md_metaprop, folder_tag_vars),
     )
+
+    export_opts = output_module.get_folder_export_opts(folder, export_opts)
 
     export_stats: ExportStatsT = {
         # Start with stats that will always be output
@@ -1479,7 +948,7 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
     }
 
     if export_opts.with_attachments:
-        export_stats[ExportStat.STAT_ATTACHMENT_LINKED] = 0
+        export_stats[ExportStat.STAT_ATTACHMENT_SAVED] = 0
 
     # https://learn.microsoft.com/en-us/graph/query-parameters
     params: dict[str, str | int] | None = {
@@ -1504,9 +973,13 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         params["$top"] = export_opts.batch_size
         params["$orderby"] = "lastModifiedDateTime,internetMessageId,subject"
 
-    if exported_total_count:
+    if export_opts.filter_test:
+        params["$select"] = "id"  # Might as well make the response shorter
+    elif exported_total_count:
         params["$skip"] = exported_total_count  # skip already exported messages
-        _exportstat_incr(export_stats, ExportStat.STAT_SKIPPED_DUPLICATE, incr=exported_total_count)
+        exportstat_incr(export_stats, ExportStat.STAT_SKIPPED_DUPLICATE, incr=exported_total_count)
+
+    output_module.update_list_messages_params(params)
 
     # https://learn.microsoft.com/en-us/graph/api/resources/mail-api-overview
     # https://learn.microsoft.com/en-us/graph/api/message-get
@@ -1608,6 +1081,7 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
                     params,
                     min(export_opts.batch_size, export_limit - exported_total_count),
                     manifest_ids,
+                    output_module,
                     export_opts,
                     export_stats,
                 )
@@ -1767,6 +1241,8 @@ def _export_folder_worker(  # noqa: C901
     # Reset task start time to get true elapsed time for this folder.
     progress.reset(progress_task_id, start=True)
 
+    output_module = EXPORT_MODULES[export_opts.out_format]()
+
     try:
         with sessions.Session() as session:
             return _export_folder(
@@ -1775,6 +1251,7 @@ def _export_folder_worker(  # noqa: C901
                 progress,
                 progress_task_id,
                 graph_config,
+                output_module,
                 export_opts,
             )
     except requests.RequestException as err:
@@ -2042,6 +1519,15 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
             rich_help_panel="Output",
         ),
     ] = None,
+    out_format: Annotated[
+        OutputFormatChoice,
+        typer.Option(
+            "--format",
+            "-F",
+            help="Output file format.",
+            rich_help_panel="Output",
+        ),
+    ] = OutputFormatChoice.md,
     folder: Annotated[
         list[str] | None,
         typer.Option(
@@ -2096,7 +1582,6 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         list[str] | None,
         typer.Option(
             "--filter",
-            "-F",
             metavar="CONDITION",
             help="Export messages matching filter criteria; option can be used more than once.",
             rich_help_panel="Filter and search",
@@ -2122,7 +1607,6 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         list[str] | None,
         typer.Option(
             "--search",
-            "-s",
             metavar="CONDITION",
             help="Export messages matching search criteria; option can be used more than once.",
             rich_help_panel="Filter and search",
@@ -2342,6 +1826,7 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         raise typer.Exit(code=1)
 
     export_opts = ExportOptions(
+        out_format=out_format,
         attachments_folder=attachments_folder,
         attachments_mkdir=attachments_mkdir,
         batch_size=batch_size,
@@ -2369,7 +1854,13 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         if search_query:
             console.print(f"[bold]Testing search criteria for {len(folders)} folders")
     else:
-        console.print(f"Exporting messages from {len(folders)} folders to '{out_dir}'...")
+        msg = [f"Exporting messages from {len(folders)} folders to '{out_dir}'"]
+        if export_opts.dry_run:
+            msg.append("(dry run)")
+        msg.append("...")
+
+        console.print(" ".join(msg))
+
         logger.debug("Querying Graph API for %d messages at a time", batch_size)
 
     if filter_query:

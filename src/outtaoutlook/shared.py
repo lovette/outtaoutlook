@@ -4,10 +4,14 @@ import hashlib
 import json
 import logging
 import os
+import re
+import textwrap
 import threading
+from collections import defaultdict
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from enum import StrEnum
 from operator import itemgetter
 from pathlib import Path
 from typing import Any
@@ -28,6 +32,16 @@ GRAPH_API_BATCH_MIN = 25  # Arbitrary limit
 GRAPH_API_BATCH_MAX = 100  # Arbitrary limit
 MAILBOX_ROOT = None
 VERBOSE_LOGGING_LEVEL_ERROR = 0  # logging.ERROR
+TITLE_UNTITLED = "Untitled"
+TITLE_MAXLEN = 255 - 25  # macOS limit minus a few characters for whatever `unique_file_path` tacks on
+
+# These are banned outright: \/:
+# Links do not work if title includes: #^[]|
+# macOS is fine with: *"<>?
+# Title cannot start with a period.
+# \x00-\x1f\x7f = [:cntrl:]
+RE_TITLE_IGNORECHARS = re.compile(r"[\[\]\/\\:|^#\x00-\x1f\x7f]")
+RE_TITLE_WHITESPACE = re.compile(r"\s+")
 
 AUTH_ERROR_USECOMMAND = "Use the 'auth' command to sign in and grant access."
 AUTH_REQUIRED_ERROR = "Access to Microsoft Outlook via the Microsoft Graph API is required."
@@ -236,6 +250,60 @@ class CommandContext:
         self.common_opts = CommonCommandOptions()
 
 
+class OutputFormatChoice(StrEnum):
+    """Choices for output file format."""
+
+    json = "json"
+    md = "md"
+
+
+class ExportError(GraphApiError):
+    """Export failure."""
+
+
+class ExportStat(StrEnum):
+    """Export statistic messages."""
+
+    STAT_FILE_CREATED = "Files created"
+    STAT_ATTACHMENT_SAVED = "Attachments saved"
+    STAT_SKIPPED_DUPLICATE = "Skipped; Message already exported"
+    STAT_SKIPPED_MARKDOWN_CONVERSION_FAILED = "Skipped; Markdown conversion failed"
+    STAT_SKIPPED_NO_MESSAGE_BODY = "Skipped; No message body"
+    STAT_SKIPPED_NO_MESSAGE_CONTENT_JUST_ATTACHMENTS = "Skipped; No file content, just attachments (not being saved)"
+    STAT_SKIPPED_NO_MESSAGE_CONTENT_NO_ATTACHMENTS = "Skipped; No file content"
+    STAT_SKIPPED_NO_MESSAGE_CONTENT_UNKNOWN = "Skipped; No file content, unknown reason"
+    STAT_SKIPPED_EVENT_MESSAGE = "Skipped; Calendar event"
+
+
+@dataclass
+class ExportOptions:
+    """Export command options."""
+
+    out_format: OutputFormatChoice  # Output file format.
+    attachments_folder: str | Path  # `ATTACHMENTS_FOLDER_*`, folder name or absolute path.
+    attachments_mkdir: bool  # Create mail folder hierarchy in attachments directory.
+    batch_size: int  # Number of messages to process in a batch.
+    dry_run: bool  # Whether to perform a dry run without making any changes.
+    filter_query: str | None  # --filter criteria from command line and config file.
+    filter_test: bool  # Whether to perform a filter test without exporting.
+    manifest_dir: Path | None  # Directory to write the manifest file.
+    mkdir_maxdepth: int | None  # Maximum depth (from the leaf) of folder tree to create when creating mail folder hierarchy.
+    md_body_tags: list[str] | None  # --body-tag tags from command line and config file.
+    md_metaprop: FileMetaPropT | None  # --metaprop properties from command line and config file.
+    md_tags: list[str] | None  # --tag tags from command line and config file.
+    files_dir: Path  # Directory to save files (set internally.)
+    files_limit: int  # Maximum number of files to export (per folder).
+    files_mkdir: bool  # Create mail folder hierarchy in files directory.
+    md_place_tags_body_end: bool  # True to place body tags at the end of the file instead the top.
+    md_place_tags_frontmatter: bool  # True to place non-body tags in frontmatter.
+    search_query: str | None  # --search criteria from command line and config file.
+    root_out_dir: Path  # Root output directory (set by user.)
+    with_attachments: bool  # Whether to download and link attachments to files.
+
+
+ExportStatsT = dict[ExportStat, int]
+
+
 ######################################################################
 # Globals
 
@@ -248,6 +316,13 @@ logger = logging.getLogger(APP_NAME)  # initialized in __main__
 # Requests will fail with 'MailboxConcurrency' error if limit is exceeded.
 GRAPH_API_CONCURRENT_LIMIT = 4
 graph_get_resource_lock = threading.Semaphore(GRAPH_API_CONCURRENT_LIMIT)
+
+# There is a gap of time between a unique path name being generated
+# and the file is actually created on disk.
+# Therefore we need a way to reserve unique paths that is coordinated between all threads.
+# We do this by keeping a set of unique paths and a lock to coordinate access.
+# dict[path.parent]=(set(path.name), lock)
+unique_file_path_sets: dict[Path, tuple[set[str], threading.Lock]] = defaultdict(lambda: (set(), threading.Lock()))
 
 
 ######################################################################
@@ -950,3 +1025,123 @@ def get_hash_filename(content: str, prefix: str, suffix: str) -> Path:
     full_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
     short_hash = full_hash[:32]
     return Path(f"{prefix}_{short_hash}{suffix}")
+
+
+def safe_file_name(subject: str, default: str) -> str:
+    """Clean up title so it is safe to be used as a file name.
+
+    Args:
+        subject (str): Message subject.
+        default (str): Default title if subject is empty.
+
+    Returns:
+        str
+    """
+    subject = subject.replace(":", " ")  # Common separator so we'll replace it with a safe character.
+    subject = RE_TITLE_IGNORECHARS.sub("", subject)
+    subject = RE_TITLE_WHITESPACE.sub(" ", subject)
+
+    if len(subject) > TITLE_MAXLEN:
+        # Truncate text while preserving whole words if possible
+        subject = textwrap.shorten(subject, width=TITLE_MAXLEN, placeholder="")
+
+    subject = subject.strip(" .")
+
+    return subject or default
+
+
+def unique_file_path(p: Path, date_hint: datetime | None = None) -> Path:
+    """Create a Path with unique file name, optionally using a date hint.
+
+    Args:
+        p (Path): Existing path.
+        date_hint (datetime | None): Optional datetime to include in the filename for uniqueness.
+
+    Raises:
+        ExportError: Raised if too many copies of the file already exist.
+
+    Returns:
+        Path: Unique path with a non-conflicting file name.
+    """
+
+    def _get_unique_path(p_base: Path) -> Path | None:
+        n = 1
+        unique_path = p_base
+
+        while n < max_paths:
+            exists = (unique_path.name in path_names_set) or unique_path.exists()
+            path_names_set.add(unique_path.name)
+            if not exists:
+                return unique_path
+            unique_path = p_base.with_stem(f"{p_base.stem} ({n})")
+            n += 1
+
+        return None
+
+    # Keep in mind we need to keep the final filename within TITLE_MAXLEN characters.
+
+    max_paths = 10000
+    path_names_set, path_names_lock = unique_file_path_sets[p.parent]
+
+    with path_names_lock:
+        unique_path = _get_unique_path(p)
+        if unique_path:
+            return unique_path
+
+    if date_hint:
+        # Try using the date hint to create a unique filename.
+        p = p.with_stem(f"{p.stem} {date_hint:%Y%m%d%H%M%S}")
+        with path_names_lock:
+            unique_path = _get_unique_path(p)
+            if unique_path:
+                return unique_path
+
+    errmsg = f"{max_paths} copies of '{p}' already exist?!"
+    raise ExportError(errmsg)
+
+
+def exportstat_incr(export_stats: ExportStatsT, stat: ExportStat, incr: int = 1) -> None:
+    """Increment specified export stat.
+
+    Args:
+        export_stats (ExportStatsT): Export stats dictionary.
+        stat (ExportStat): Stat to increment.
+        incr (int, optional): Increment amount. Defaults to 1.
+    """
+    export_stats[stat] = export_stats.get(stat, 0) + incr
+
+
+def log_message_notice(message: GraphMessageT, errmsg: str, level: int = logging.WARNING) -> None:
+    """Log a warning related to a message.
+
+    Args:
+        message (GraphMessageT): Message object.
+        errmsg (str): Warning description.
+        level (int): Logging level code (e.g., logging.WARNING).
+    """
+    logger.log(level, 'message("%s"): %s', message["subject"], errmsg)
+
+
+def write_output_file(
+    file_path: Path,
+    file_text: str,
+    file_date: datetime | None,
+    export_opts: ExportOptions,
+) -> None:
+    """Write output file and set its modification date.
+
+    Args:
+        file_path (Path): Output file path.
+        file_text (str): File content.
+        file_date (datetime | None): Modification date. If None, the file's modification date will not be set.
+        export_opts (ExportOptions): Export options.
+    """
+    if not export_opts.dry_run:
+        file_path.write_text(file_text, encoding="utf-8")
+
+        if file_date:
+            os.utime(file_path, (file_date.timestamp(), file_date.timestamp()))
+
+        logger.debug("Wrote file to '%s'", file_path.name)
+    else:
+        logger.debug("Wrote file to '%s' (dry run)", file_path.name)
