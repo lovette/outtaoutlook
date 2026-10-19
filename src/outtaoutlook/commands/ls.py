@@ -1,4 +1,4 @@
-"""outlook2obsidian ls command."""
+"""outtaoutlook ls command."""
 
 from pathlib import Path
 from typing import Annotated
@@ -7,7 +7,7 @@ import requests
 import typer
 from requests import sessions
 
-from outlook2obsidian.shared import (
+from outtaoutlook.shared import (
     AUTH_ERROR_USECOMMAND,
     CommandContext,
     GraphApiError,

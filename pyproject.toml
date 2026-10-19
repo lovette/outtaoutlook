@@ -1,5 +1,5 @@
 [project]
-name = "outlook2obsidian"
+name = "outtaoutlook"
 version = "0.1.0"
 description = "Download messages from Microsoft Outlook using the Microsoft Graph API and save them to an Obsidian vault."
 readme = "README.md"
@@ -27,7 +27,7 @@ requires = ["uv_build>=0.12.23,<0.13.0"]
 build-backend = "uv_build"
 
 [project.scripts]
-outlook2obsidian = "outlook2obsidian.__main__:app"
+outtaoutlook = "outtaoutlook.__main__:app"
 
 # https://beta.ruff.rs/docs/tutorial/#rule-selection
 [tool.ruff]

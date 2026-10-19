@@ -46,7 +46,7 @@ install-dev:  ## Install project packages and script for development
 
 .PHONY: uninstall
 uninstall:  ## Uninstall project script from system-wide access
-	uv tool uninstall outlook2obsidian
+	uv tool uninstall outtaoutlook
 
 
 ############################

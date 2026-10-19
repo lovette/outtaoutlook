@@ -1,4 +1,4 @@
-"""outlook2obsidian commands."""
+"""outtaoutlook commands."""
 
 from .auth import app as auth_app
 from .export import app as export_app

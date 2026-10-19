@@ -3,8 +3,8 @@
 ############################################
 # Options common to all commands
 
-auth_file: "~/outlook2obsidian_cache"
-cache_dir: "$TMPDIR/outlook2obsidian_cache"
+auth_file: "~/outtaoutlook_cache"
+cache_dir: "$TMPDIR/outtaoutlook_cache"
 cache_graph_api: true
 verbose: 3
 

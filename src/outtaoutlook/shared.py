@@ -1,4 +1,4 @@
-"""outlook2obsidian shared variables and functions."""
+"""outtaoutlook shared variables and functions."""
 
 import hashlib
 import json
@@ -20,7 +20,7 @@ from rich.console import Console
 ######################################################################
 # Constants
 
-APP_NAME = "outlook2obsidian"
+APP_NAME = "outtaoutlook"
 AUTHORITY_ENVIRONMENT_DEFAULT = "login.microsoftonline.com"
 GRAPH_API_URL = "https://graph.microsoft.com/beta"
 GRAPH_SCOPES = ["Mail.Read"]

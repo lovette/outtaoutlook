@@ -1,4 +1,4 @@
-"""outlook2obsidian auth command."""
+"""outtaoutlook auth command."""
 
 import logging
 from pathlib import Path
@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Annotated
 import requests
 import typer
 
-from outlook2obsidian.shared import (
+from outtaoutlook.shared import (
     APP_NAME,
     AUTH_ERROR_USECOMMAND,
     AUTH_NO_CACHE_ERROR,

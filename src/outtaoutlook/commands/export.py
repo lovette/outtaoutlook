@@ -1,4 +1,4 @@
-"""outlook2obsidian export command."""
+"""outtaoutlook export command."""
 
 import base64
 import binascii
@@ -34,7 +34,7 @@ from requests import sessions
 from rich.progress import BarColumn, Progress, ProgressColumn, SpinnerColumn, Task, TaskID, TextColumn
 from rich.text import Text
 
-from outlook2obsidian.shared import (
+from outtaoutlook.shared import (
     APP_NAME,
     AUTH_ERROR_USECOMMAND,
     GRAPH_API_BATCH_MAX,

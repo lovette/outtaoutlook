@@ -8,7 +8,7 @@
             "name": "auth w credentials",
             "type": "debugpy",
             "request": "launch",
-            "module": "outlook2obsidian",
+            "module": "outtaoutlook",
             "console": "integratedTerminal",
             "args": [
                 "--config-file",
@@ -21,7 +21,7 @@
             "name": "auth force",
             "type": "debugpy",
             "request": "launch",
-            "module": "outlook2obsidian",
+            "module": "outtaoutlook",
             "console": "integratedTerminal",
             "args": [
                 "--config-file",
@@ -35,7 +35,7 @@
             "name": "auth info",
             "type": "debugpy",
             "request": "launch",
-            "module": "outlook2obsidian",
+            "module": "outtaoutlook",
             "console": "integratedTerminal",
             "args": [
                 "--config-file",
@@ -49,7 +49,7 @@
             "name": "list folders",
             "type": "debugpy",
             "request": "launch",
-            "module": "outlook2obsidian",
+            "module": "outtaoutlook",
             "console": "integratedTerminal",
             "args": [
                 "-c",
@@ -62,14 +62,14 @@
             "name": "export",
             "type": "debugpy",
             "request": "launch",
-            "module": "outlook2obsidian",
+            "module": "outtaoutlook",
             "console": "integratedTerminal",
             "args": [
                 "--config-file",
                 "${userHome}/Temp",
                 "export",
                 "Drafts",
-                "${userHome}/Temp/outlook2obsidian",
+                "${userHome}/Temp/outtaoutlook",
             ],
             "justMyCode": true
         }
