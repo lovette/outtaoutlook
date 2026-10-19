@@ -26,7 +26,7 @@ ls:
 #
 # Tags and metadata properties can reference dynamic values such as:
 # - {now.[datetime|date|time|year]}
-# - {note.title} (property only)
+# - {file.title} (property only)
 #
 # - {folder.displayName}
 # - {folder.folderPath}
@@ -62,12 +62,12 @@ export:
     - "Deleted Items"
     - "Junk Email"
 
-  place_tags_frontmatter: true
-  place_tags_body_end: false
+  md_place_tags_frontmatter: true
+  md_place_tags_body_end: false
   use_manifest: true
   limit: 0
   batch_size: 100
-  notes_mkdir: false
+  files_mkdir: false
   dry_run: false
   with_attachments: true
   attachments_folder: "assets"
@@ -86,7 +86,7 @@ export:
 
   # Metadata properties
   metaprop:
-    "title": "{note.title}"
+    "title": "{file.title}"
     "subject": "{message.subject}"
     "created": "{message.created.date}"
     "modified": "{message.date.date}"

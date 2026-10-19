@@ -170,7 +170,7 @@ GraphFolderT = dict[str, Any]  # GRAPH_FOLDER_FIELDS
 GraphMessageT = dict[str, Any]  # GRAPH_MESSAGE_FIELDS
 GraphAppMetadataT = dict[str, Any]  # GRAPH_APPMETADATA_FIELDS
 GraphAttachmentT = dict[str, Any]  # GRAPH_ATTACHMENT_FIELDS_SET
-NoteMetaPropT = dict[str, str | int | Sequence[str | int]]
+FileMetaPropT = dict[str, str | int | Sequence[str | int]]
 
 
 class GraphApiError(Exception):
@@ -230,7 +230,7 @@ class CommandContext:
     config_file_path: Path | None = None  # set if --config-file is provided and is read
     config_file_opts: dict[str, Any] | None = None  # set if configuration file contains non-`default_map` options
 
-    export_metaprops: NoteMetaPropT | None = None  # set if export command has `--metaprop` options
+    export_metaprops: FileMetaPropT | None = None  # set if export command has `--metaprop` options
 
     def __post_init__(self) -> None:  # noqa: D105
         self.common_opts = CommonCommandOptions()

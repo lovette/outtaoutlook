@@ -43,6 +43,7 @@ from outtaoutlook.shared import (
     GRAPH_MESSAGE_FIELDS_SET,
     MAILBOX_ROOT,
     CommandContext,
+    FileMetaPropT,
     GraphApiConfig,
     GraphApiError,
     GraphApiReturnT,
@@ -50,7 +51,6 @@ from outtaoutlook.shared import (
     GraphAuthRequiredError,
     GraphFolderT,
     GraphMessageT,
-    NoteMetaPropT,
     console,
     datetime_now,
     err_console,
@@ -100,7 +100,7 @@ FOLDER_ICON = "\N{OPEN FILE FOLDER}\N{NARROW NO-BREAK SPACE}"
 ATTACHMENT_DEFAULT_SUFFIX = ".bin"
 ATTACHMENT_DEFAULT_NAME = "unnamed"  # suffix will be guessed
 ATTACHMENTS_DEFAULT_FOLDER = "assets"
-ATTACHMENTS_FOLDER_NOTE = "note"
+ATTACHMENTS_FOLDER_FILE = "same"
 ATTACHMENTS_FOLDER_ROOT = "root"
 
 # https://learn.microsoft.com/en-us/graph/api/attachment-get
@@ -180,14 +180,14 @@ class FilterJoinCond(StrEnum):
 class ExportStat(StrEnum):
     """Export statistic messages."""
 
-    STAT_NOTE_CREATED = "Notes created"
+    STAT_FILE_CREATED = "Files created"
     STAT_ATTACHMENT_LINKED = "Attachments linked"
     STAT_SKIPPED_DUPLICATE = "Skipped; Message already exported"
     STAT_SKIPPED_MARKDOWN_CONVERSION_FAILED = "Skipped; Markdown conversion failed"
     STAT_SKIPPED_NO_MESSAGE_BODY = "Skipped; No message body"
-    STAT_SKIPPED_NO_MESSAGE_CONTENT_JUST_ATTACHMENTS = "Skipped; No note content, just attachments (not being saved)"
-    STAT_SKIPPED_NO_MESSAGE_CONTENT_NO_ATTACHMENTS = "Skipped; No note content"
-    STAT_SKIPPED_NO_MESSAGE_CONTENT_UNKNOWN = "Skipped; No note content, unknown reason"
+    STAT_SKIPPED_NO_MESSAGE_CONTENT_JUST_ATTACHMENTS = "Skipped; No file content, just attachments (not being saved)"
+    STAT_SKIPPED_NO_MESSAGE_CONTENT_NO_ATTACHMENTS = "Skipped; No file content"
+    STAT_SKIPPED_NO_MESSAGE_CONTENT_UNKNOWN = "Skipped; No file content, unknown reason"
     STAT_SKIPPED_EVENT_MESSAGE = "Skipped; Calendar event"
 
 
@@ -203,17 +203,17 @@ class ExportOptions:
     filter_test: bool  # Whether to perform a filter test without exporting.
     manifest_dir: Path | None  # Directory to write the manifest file.
     mkdir_maxdepth: int | None  # Maximum depth (from the leaf) of folder tree to create when creating mail folder hierarchy.
-    note_body_tags: list[str] | None  # --body-tag tags from command line and config file.
-    note_metaprop: NoteMetaPropT | None  # --metaprop properties from command line and config file.
-    note_tags: list[str] | None  # --tag tags from command line and config file.
-    notes_dir: Path  # Directory to save notes (set internally.)
-    notes_limit: int  # Maximum number of notes to export (per folder).
-    notes_mkdir: bool  # Create mail folder hierarchy in notes directory.
-    place_tags_body_end: bool  # True to place body tags at the end of the note instead the top.
-    place_tags_frontmatter: bool  # True to place non-body tags in frontmatter.
+    md_body_tags: list[str] | None  # --body-tag tags from command line and config file.
+    md_metaprop: FileMetaPropT | None  # --metaprop properties from command line and config file.
+    md_tags: list[str] | None  # --tag tags from command line and config file.
+    files_dir: Path  # Directory to save files (set internally.)
+    files_limit: int  # Maximum number of files to export (per folder).
+    files_mkdir: bool  # Create mail folder hierarchy in files directory.
+    md_place_tags_body_end: bool  # True to place body tags at the end of the file instead the top.
+    md_place_tags_frontmatter: bool  # True to place non-body tags in frontmatter.
     search_query: str | None  # --search criteria from command line and config file.
     root_out_dir: Path  # Root output directory (set by user.)
-    with_attachments: bool  # Whether to download and link attachments to notes.
+    with_attachments: bool  # Whether to download and link attachments to files.
 
 
 ExportStatsT = dict[ExportStat, int]
@@ -295,7 +295,7 @@ def _opt_attachments_folder_callback(attachments_folder: str) -> str:
         str: Special keyword, valid folder name or absolute path.
     """
     # Special keywords.
-    if attachments_folder.upper() == ATTACHMENTS_FOLDER_ROOT or attachments_folder.startswith(ATTACHMENTS_FOLDER_NOTE):
+    if attachments_folder.upper() == ATTACHMENTS_FOLDER_ROOT or attachments_folder.startswith(ATTACHMENTS_FOLDER_FILE):
         return attachments_folder
 
     # Name of subfolder such as "assets" or "attachments".
@@ -380,15 +380,15 @@ def _opt_metaprop_callback(
     return meta
 
 
-def _merge_metaprops(a: NoteMetaPropT, b: NoteMetaPropT | None) -> NoteMetaPropT:
+def _merge_metaprops(a: FileMetaPropT, b: FileMetaPropT | None) -> FileMetaPropT:
     """Combines two dictionaries, merging duplicate keys into a list of values.
 
     Args:
-        a (NoteMetaPropT): Dictionary.
-        b (NoteMetaPropT | None): Dictionary to merge into `a`. If None, a copy of `a` is returned.
+        a (FileMetaPropT): Dictionary.
+        b (FileMetaPropT | None): Dictionary to merge into `a`. If None, a copy of `a` is returned.
 
     Returns:
-        NoteMetaPropT
+        FileMetaPropT
     """
     c = a.copy()
 
@@ -545,15 +545,15 @@ def _clean_tags(tags: list[str]) -> list[str]:
     return tags
 
 
-def _expand_vars_dict(d: NoteMetaPropT, prop_vars: dict[str, str]) -> NoteMetaPropT:
+def _expand_vars_dict(d: FileMetaPropT, prop_vars: dict[str, str]) -> FileMetaPropT:
     """Expand dynamic variable references in a dictionary of metadata properties.
 
     Args:
-        d (NoteMetaPropT): Dictionary of properties to expand.
+        d (FileMetaPropT): Dictionary of properties to expand.
         prop_vars (dict[str, str]): Dictionary of replacement patterns.
 
     Returns:
-        NoteMetaPropT: Updated dictionary with message-related placeholders expanded.
+        FileMetaPropT: Updated dictionary with message-related placeholders expanded.
     """
 
     def _varrepl(m: re.Match) -> str:
@@ -632,9 +632,9 @@ def _expand_folder_tags(
 
 def _expand_folder_metaprop(
     folder: GraphFolderT,
-    metaprop: NoteMetaPropT | None,
+    metaprop: FileMetaPropT | None,
     prop_vars: dict[str, str],
-) -> NoteMetaPropT | None:
+) -> FileMetaPropT | None:
     """Expand folder related metadata properties.
 
     Args:
@@ -662,11 +662,11 @@ def _expand_folder_metaprop(
     return metaprop
 
 
-def _init_note_frontmatter(metaprop: NoteMetaPropT | None, prop_vars: dict[str, str]) -> FrontmatterT:
-    """Initialize note frontmatter with expanded metadata properties.
+def _init_file_frontmatter(metaprop: FileMetaPropT | None, prop_vars: dict[str, str]) -> FrontmatterT:
+    """Initialize file frontmatter with expanded metadata properties.
 
     Args:
-        metaprop (NoteMetaPropT | None): Dictionary of metadata properties to expand.
+        metaprop (FileMetaPropT | None): Dictionary of metadata properties to expand.
         prop_vars (dict[str, str]): Dictionary of replacement patterns.
 
     Returns:
@@ -700,16 +700,16 @@ def _init_note_frontmatter(metaprop: NoteMetaPropT | None, prop_vars: dict[str, 
     return frontmatter
 
 
-def _append_note_tags(
-    note_content: str,
+def _append_md_tags(
+    file_content: str,
     export_opts: ExportOptions,
     tag_vars: dict[str, str],
     frontmatter: FrontmatterT,
 ) -> str:
-    """Append tags to note content and/or frontmatter.
+    """Append tags to file content and/or frontmatter.
 
     Args:
-        note_content (str): Note content.
+        file_content (str): File content.
         export_opts (ExportOptions): Export options.
         tag_vars (dict[str, str]): Dictionary of replacement patterns.
         frontmatter (FrontmatterT): Frontmatter dictionary. Frontmatter tags will be added here if applicable.
@@ -717,10 +717,10 @@ def _append_note_tags(
     Returns:
         str
     """
-    body_tags = _expand_vars_list(export_opts.note_body_tags or [], tag_vars)
-    frontmatter_tags = _expand_vars_list(export_opts.note_tags or [], tag_vars)
+    body_tags = _expand_vars_list(export_opts.md_body_tags or [], tag_vars)
+    frontmatter_tags = _expand_vars_list(export_opts.md_tags or [], tag_vars)
 
-    if not export_opts.place_tags_frontmatter:
+    if not export_opts.md_place_tags_frontmatter:
         # Place all tags in body
         body_tags.extend(frontmatter_tags)
         frontmatter_tags = []
@@ -739,12 +739,12 @@ def _append_note_tags(
     if body_tags:
         tag_block = " ".join(f"#{tag}" for tag in body_tags)
 
-        if export_opts.place_tags_body_end:
-            note_content += "\n\n" + tag_block
+        if export_opts.md_place_tags_body_end:
+            file_content += "\n\n" + tag_block
         else:
-            note_content = tag_block + "\n\n" + note_content
+            file_content = tag_block + "\n\n" + file_content
 
-    return note_content
+    return file_content
 
 
 def _convert_to_markdown(body_content: str) -> str | None:
@@ -754,11 +754,11 @@ def _convert_to_markdown(body_content: str) -> str | None:
         body_content (str): The HTML body content of the message.
 
     Returns:
-        str|None: Note content or None if message has no body or Markdown conversion fails.
+        str|None: File content or None if message has no body or Markdown conversion fails.
     """
     # https://github.com/matthewwithanm/python-markdownify
     # from markdownify import markdownify as html_to_md
-    # note_content = html_to_md(body_content)
+    # file_content = html_to_md(body_content)
 
     # https://github.com/xberg-io/html-to-markdown
     # https://pypi.org/project/html-to-markdown/
@@ -946,7 +946,7 @@ def _save_attachment(  # noqa: PLR0913, PLR0917
     message: GraphMessageT,
     attachment: GraphAttachmentT,
     attachment_name_prefix: str,
-    note_date: datetime,
+    file_date: datetime,
     export_opts: ExportOptions,
 ) -> Path | None:
     """Save a message attachment to the local filesystem.
@@ -957,7 +957,7 @@ def _save_attachment(  # noqa: PLR0913, PLR0917
         message (GraphMessageT): Message properties.
         attachment (GraphAttachmentT): Attachment properties.
         attachment_name_prefix (str): Prefix to prepend to attachment filenames. Must be filename safe.
-        note_date (datetime): The date of the note.
+        file_date (datetime): The date of the file.
         export_opts (ExportOptions): Export options.
 
     Returns:
@@ -981,7 +981,7 @@ def _save_attachment(  # noqa: PLR0913, PLR0917
     assert isinstance(export_opts.attachments_folder, Path)  # noqa: S101
     assert export_opts.attachments_folder.is_absolute()  # noqa: S101
 
-    attachment_path = _unique_out_path(export_opts.attachments_folder / Path(attachment["name"]), note_date)
+    attachment_path = _unique_out_path(export_opts.attachments_folder / Path(attachment["name"]), file_date)
 
     if export_opts.dry_run:
         logger.debug("Wrote attachment to '%s' (%s) (dry run)", attachment_path.name, content_type)
@@ -998,7 +998,7 @@ def _save_attachment(  # noqa: PLR0913, PLR0917
             return None
 
     if attachment_path.is_file():
-        os.utime(attachment_path, (note_date.timestamp(), note_date.timestamp()))
+        os.utime(attachment_path, (file_date.timestamp(), file_date.timestamp()))
 
     return attachment_path
 
@@ -1007,8 +1007,8 @@ def _save_attachments(  # noqa: PLR0913, PLR0917
     session: sessions.Session,
     graph_config: GraphApiConfig,
     message: GraphMessageT,
-    note_path: Path,
-    note_date: datetime,
+    file_path: Path,
+    file_date: datetime,
     export_opts: ExportOptions,
 ) -> list[str]:
     """Save message attachments to the local filesystem.
@@ -1017,8 +1017,8 @@ def _save_attachments(  # noqa: PLR0913, PLR0917
         session (sessions.Session): The requests session to pool requests.
         graph_config (GraphApiConfig): Graph API configuration.
         message (GraphMessageT): Message properties.
-        note_path (Path): The path to the note file.
-        note_date (datetime): The date of the note.
+        file_path (Path): The path to the file file.
+        file_date (datetime): The date of the file.
         export_opts (ExportOptions): Export options.
 
     Returns:
@@ -1029,8 +1029,8 @@ def _save_attachments(  # noqa: PLR0913, PLR0917
         OSError derived error (e.g. file system errors, permission errors, etc.)
     """
 
-    def _attachment_rel_links(abs_paths: list[Path], note_dir: Path, root_out_dir: Path) -> list[str]:
-        """Convert absolute paths into paths relative to the note directory or the root output directory.
+    def _attachment_rel_links(abs_paths: list[Path], file_dir: Path, root_out_dir: Path) -> list[str]:
+        """Convert absolute paths into paths relative to the file directory or the root output directory.
 
         For links without a path, Obsidian seems to search:
 
@@ -1051,7 +1051,7 @@ def _save_attachments(  # noqa: PLR0913, PLR0917
                     rel_path = str(abs_path.relative_to(root_out_dir, walk_up=True))
                 except ValueError:
                     rel_path = abs_path.as_uri()
-            elif abs_path.is_relative_to(note_dir) or abs_path.is_relative_to(root_out_dir):
+            elif abs_path.is_relative_to(file_dir) or abs_path.is_relative_to(root_out_dir):
                 rel_path = abs_path.name
             else:
                 rel_path = abs_path.as_uri()
@@ -1068,15 +1068,15 @@ def _save_attachments(  # noqa: PLR0913, PLR0917
             graph_config,
             message,
             attachment,
-            note_path.stem,
-            note_date,
+            file_path.stem,
+            file_date,
             export_opts,
         )
 
         if attachment_path:
             attachment_paths.append(attachment_path)
 
-    return _attachment_rel_links(attachment_paths, note_path.parent, export_opts.root_out_dir)
+    return _attachment_rel_links(attachment_paths, file_path.parent, export_opts.root_out_dir)
 
 
 def _export_message(  # noqa: C901, PLR0912, PLR0915
@@ -1154,32 +1154,32 @@ def _export_message(  # noqa: C901, PLR0912, PLR0915
     content_type: str | None = message.get("body", {}).get("contentType")
     has_attachments: bool | None = message.get("hasAttachments")
     dt_now = datetime_now()
-    note_body = body_content
+    file_body = body_content
     data_type: str | None = message.get("@odata.type")
     is_calendar_related = data_type and data_type in MESSAGE_DATATYPE_EVENT_MESSAGE_SET
 
     _fix_dates(message, bool(is_draft))
 
-    note_date: datetime = message["receivedDateTime"] or message["sentDateTime"]
+    file_date: datetime = message["receivedDateTime"] or message["sentDateTime"]
     if is_draft:
-        note_date = message["lastModifiedDateTime"] or message["createdDateTime"]
+        file_date = message["lastModifiedDateTime"] or message["createdDateTime"]
 
     if body_content:
         if is_calendar_related:
             pass  # Calendar requests and responses are skipped
         elif content_type == "html":
-            note_body = _convert_to_markdown(body_content)
+            file_body = _convert_to_markdown(body_content)
         elif content_type != "text":
             _log_message_notice(message, f"field('contentType'): unexpected type: '{content_type}'")
 
-    if not note_body or is_calendar_related:
+    if not file_body or is_calendar_related:
         skip_reason, level = None, logging.INFO
 
         if is_calendar_related:
             skip_reason, level = ExportStat.STAT_SKIPPED_EVENT_MESSAGE, logging.DEBUG
         elif body_content is None:
             skip_reason, level = ExportStat.STAT_SKIPPED_NO_MESSAGE_BODY, logging.WARNING
-        elif note_body is None:
+        elif file_body is None:
             skip_reason, level = ExportStat.STAT_SKIPPED_MARKDOWN_CONVERSION_FAILED, logging.WARNING
         elif has_attachments and export_opts.with_attachments:
             pass  # export attachments
@@ -1193,9 +1193,9 @@ def _export_message(  # noqa: C901, PLR0912, PLR0915
         if skip_reason:
             _exportstat_incr(export_stats, skip_reason)
             _log_message_notice(message, skip_reason.value, level)
-            return  # don't write empty notes
+            return  # don't write empty files
 
-        note_body = ""  # content will be links to attachments
+        file_body = ""  # content will be links to attachments
 
     tag_vars = {}
 
@@ -1204,7 +1204,7 @@ def _export_message(  # noqa: C901, PLR0912, PLR0915
     # {message.[date|sent|received|created|modified].[datetime|date|time|year]}
     for var_name, dt in (
         ("now", dt_now),
-        ("message.date", note_date),
+        ("message.date", file_date),
         ("message.created", message["createdDateTime"]),
         ("message.modified", message["lastModifiedDateTime"]),
         ("message.received", message["receivedDateTime"]),
@@ -1217,13 +1217,13 @@ def _export_message(  # noqa: C901, PLR0912, PLR0915
 
     # Dynamic variables that can be referenced in metadata properties.
     metaprop_vars = tag_vars | {
-        "{note.title}": title,
+        "{file.title}": title,
         "{message.subject}": subject,
     }
 
-    note_content: list[str] = []
+    file_content: list[str] = []
     attachment_links: list[str] = []
-    note_path = _unique_out_path(export_opts.notes_dir / Path(title + ".md"), note_date)
+    file_path = _unique_out_path(export_opts.files_dir / Path(title + ".md"), file_date)
 
     # Save attachments and get links to them
     if has_attachments and export_opts.with_attachments:
@@ -1231,45 +1231,45 @@ def _export_message(  # noqa: C901, PLR0912, PLR0915
             session,
             graph_config,
             message,
-            note_path,
-            note_date,
+            file_path,
+            file_date,
             export_opts,
         )
 
-        inline = len(attachment_paths) == 1 and not note_body  # Note consists of a single inline link
+        inline = len(attachment_paths) == 1 and not file_body  # File consists of a single inline link
         attachment_links = [_rel_path_link(rel_path_or_uri, inline=inline) for rel_path_or_uri in attachment_paths]
 
         _exportstat_incr(export_stats, ExportStat.STAT_ATTACHMENT_LINKED, len(attachment_paths))
 
-    frontmatter = _init_note_frontmatter(export_opts.note_metaprop, metaprop_vars)
+    frontmatter = _init_file_frontmatter(export_opts.md_metaprop, metaprop_vars)
 
-    note_body = _append_note_tags(note_body, export_opts, tag_vars, frontmatter)
+    file_body = _append_md_tags(file_body, export_opts, tag_vars, frontmatter)
 
     if frontmatter:
         # Frontmatter goes first
-        note_content = [
+        file_content = [
             "---",
             yaml.safe_dump(frontmatter, sort_keys=False).strip(),
             "---",
-            *note_content,
+            *file_content,
         ]
 
     if attachment_links:
-        note_content.extend(attachment_links)
-        note_content.append("")  # blank line
+        file_content.extend(attachment_links)
+        file_content.append("")  # blank line
 
-    # Note body goes last
-    note_content.append(note_body)
+    # File body goes last
+    file_content.append(file_body)
 
     if not export_opts.dry_run:
-        note_text = "\n".join(note_content).strip() + "\n"
-        note_path.write_text(note_text, encoding="utf-8")
-        os.utime(note_path, (note_date.timestamp(), note_date.timestamp()))
-        logger.debug("Wrote note to '%s'", note_path.name)
+        file_text = "\n".join(file_content).strip() + "\n"
+        file_path.write_text(file_text, encoding="utf-8")
+        os.utime(file_path, (file_date.timestamp(), file_date.timestamp()))
+        logger.debug("Wrote file to '%s'", file_path.name)
     else:
-        logger.debug("Wrote note to '%s' (dry run)", note_path.name)
+        logger.debug("Wrote file to '%s' (dry run)", file_path.name)
 
-    _exportstat_incr(export_stats, ExportStat.STAT_NOTE_CREATED)
+    _exportstat_incr(export_stats, ExportStat.STAT_FILE_CREATED)
 
 
 def _export_folder_batch(  # noqa: PLR0913, PLR0917
@@ -1315,7 +1315,7 @@ def _export_folder_batch(  # noqa: PLR0913, PLR0917
     messages = data.get("value", [])
     next_url = data.get("@odata.nextLink")
 
-    progress.update(progress_task_id, status="writing notes", refresh=True)
+    progress.update(progress_task_id, status="writing files", refresh=True)
 
     for message in messages:
         if message["id"] not in exported_ids:
@@ -1416,14 +1416,14 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         manifest_data = json.loads(manifest_file_path.read_text())
         manifest_ids = set(manifest_data.get("messageImmutableIds", []))
 
-    export_limit = export_opts.notes_limit
+    export_limit = export_opts.files_limit
     exported_total_count = len(manifest_ids)
-    notes_dir = export_opts.notes_dir
+    files_dir = export_opts.files_dir
     attachments_dir_path = Path(export_opts.attachments_folder)  # assume it's an absolute path to start
     attachments_mkdir = export_opts.attachments_mkdir
 
-    if export_opts.notes_mkdir:
-        notes_dir = notes_dir / (
+    if export_opts.files_mkdir:
+        files_dir = files_dir / (
             Path(folder["folderPath"])
             if not export_opts.mkdir_maxdepth
             else Path(*Path(folder["folderPath"]).parts[-export_opts.mkdir_maxdepth :])
@@ -1435,11 +1435,11 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
     elif export_opts.attachments_folder.upper() == ATTACHMENTS_FOLDER_ROOT:
         attachments_dir_path = export_opts.root_out_dir
         attachments_mkdir = False
-    elif export_opts.attachments_folder.upper().startswith(ATTACHMENTS_FOLDER_NOTE):  # allow plural "NOTES"
-        attachments_dir_path = notes_dir
+    elif export_opts.attachments_folder.upper().startswith(ATTACHMENTS_FOLDER_FILE):  # allow plural "FILES"
+        attachments_dir_path = files_dir
         attachments_mkdir = False
     elif not attachments_dir_path.is_absolute():
-        attachments_dir_path = notes_dir / _safe_title(export_opts.attachments_folder, ATTACHMENTS_DEFAULT_FOLDER)
+        attachments_dir_path = files_dir / _safe_title(export_opts.attachments_folder, ATTACHMENTS_DEFAULT_FOLDER)
         attachments_mkdir = False
 
     if attachments_mkdir:
@@ -1450,8 +1450,8 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         )
 
     if not export_opts.filter_test:
-        _emit_log(f"Saving notes to '{notes_dir}'")
-        _mkdir(notes_dir, "notes", parents=export_opts.notes_mkdir)
+        _emit_log(f"Saving files to '{files_dir}'")
+        _mkdir(files_dir, "files", parents=export_opts.files_mkdir)
 
         if export_opts.with_attachments:
             _emit_log(f"Saving attachments to '{attachments_dir_path}'")
@@ -1466,16 +1466,16 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
     # Tweak export options without modifying caller
     export_opts = copy.replace(
         export_opts,
-        notes_dir=notes_dir,
+        files_dir=files_dir,
         attachments_folder=attachments_dir_path,
-        note_tags=_expand_folder_tags(folder, export_opts.note_tags, folder_tag_vars),
-        note_body_tags=_expand_folder_tags(folder, export_opts.note_body_tags, folder_tag_vars),
-        note_metaprop=_expand_folder_metaprop(folder, export_opts.note_metaprop, folder_tag_vars),
+        md_tags=_expand_folder_tags(folder, export_opts.md_tags, folder_tag_vars),
+        md_body_tags=_expand_folder_tags(folder, export_opts.md_body_tags, folder_tag_vars),
+        md_metaprop=_expand_folder_metaprop(folder, export_opts.md_metaprop, folder_tag_vars),
     )
 
     export_stats: ExportStatsT = {
         # Start with stats that will always be output
-        ExportStat.STAT_NOTE_CREATED: 0,
+        ExportStat.STAT_FILE_CREATED: 0,
     }
 
     if export_opts.with_attachments:
@@ -2067,7 +2067,7 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
             "--tag",
             "-t",
             metavar="TAG",
-            help="Tag to apply to notes (placed either in frontmatter or body); option can be used more than once.",
+            help="Tag to apply to files (placed either in frontmatter or body); option can be used more than once.",
             rich_help_panel="Tags and metadata",
         ),
     ] = None,
@@ -2077,7 +2077,7 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
             "--body-tag",
             "-b",
             metavar="TAG",
-            help="Tag to place in notes body; option can be used more than once.",
+            help="Tag to place in files body; option can be used more than once.",
             rich_help_panel="Tags and metadata",
         ),
     ] = None,
@@ -2088,7 +2088,7 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
             "-p",
             callback=_opt_metaprop_callback,
             metavar="NAME=VALUE",
-            help="Frontmatter metadata property to apply to notes; option can be used more than once.",
+            help="Frontmatter metadata property to apply to files; option can be used more than once.",
             rich_help_panel="Tags and metadata",
         ),
     ] = None,
@@ -2146,24 +2146,26 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
             rich_help_panel="Mail folders",
         ),
     ] = None,
-    place_tags_frontmatter: Annotated[  # noqa: FBT002
+    md_place_tags_frontmatter: Annotated[  # noqa: FBT002
         bool,
         typer.Option(
-            help="Place --tag tags in note frontmatter.",
+            "--place-tags-frontmatter/--no-place-tags-frontmatter",
+            help="Place --tag tags in file frontmatter.",
             rich_help_panel="Tags and metadata",
         ),
     ] = False,
-    place_tags_body_end: Annotated[  # noqa: FBT002
+    md_place_tags_body_end: Annotated[  # noqa: FBT002
         bool,
         typer.Option(
-            help="Place body tags at the end of the note instead of the top.",
+            "--place-tags-body-end/--no-place-tags-body-end",
+            help="Place body tags at the end of the file instead of the top.",
             rich_help_panel="Tags and metadata",
         ),
     ] = False,
-    notes_mkdir: Annotated[  # noqa: FBT002
+    files_mkdir: Annotated[  # noqa: FBT002
         bool,
         typer.Option(
-            help="Create mail folder hierarchy in notes directory.",
+            help="Create mail folder hierarchy in files directory.",
             rich_help_panel="Mail folders",
         ),
     ] = False,
@@ -2171,7 +2173,7 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         bool,
         typer.Option(
             "--attachments/--no-attachments",
-            help="Download and link attachments to note.",
+            help="Download and link attachments to file.",
             rich_help_panel="Attachments",
         ),
     ] = True,
@@ -2182,8 +2184,8 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
             dir_okay=True,
             file_okay=False,
             writable=True,
-            metavar=f"'{ATTACHMENTS_FOLDER_ROOT}'|'{ATTACHMENTS_FOLDER_NOTE}'|NAME|DIRECTORY",
-            help="Store attachments in the output directory, alongside notes, a subfolder of notes, or another directory.",
+            metavar=f"'{ATTACHMENTS_FOLDER_ROOT}'|'{ATTACHMENTS_FOLDER_FILE}'|NAME|DIRECTORY",
+            help="Store attachments in the output directory, same as files, a subfolder of files, or another directory.",
             rich_help_panel="Attachments",
             callback=_opt_attachments_folder_callback,
         ),
@@ -2271,26 +2273,26 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
 
     common_opts = ctx_obj.common_opts
     config_file_export_opts: dict[str, Any] = ctx_obj.config_file_opts.get("export", {}) if ctx_obj.config_file_opts else {}
-    config_file_tags: list[str] = config_file_export_opts.get("tag", [])
-    config_file_body_tags: list[str] = config_file_export_opts.get("body_tag", [])
-    config_file_metaprop: dict[str, Any] = config_file_export_opts.get("metaprop", {})
+    config_file_md_tags: list[str] = config_file_export_opts.get("tag", [])
+    config_file_md_body_tags: list[str] = config_file_export_opts.get("body_tag", [])
+    config_file_md_metaprop: dict[str, Any] = config_file_export_opts.get("metaprop", {})
     config_file_filters: list[str] = config_file_export_opts.get("filter", [])
     config_file_search: list[str] = config_file_export_opts.get("search", [])
     config_file_not_folder: list[str] = config_file_export_opts.get("not_folder", [])
     config_file_select_folder: list[str] = config_file_export_opts.get("folder", [])
 
     # Simple YAML syntax changes can result in values being interpreted as the wrong type!
-    _validate_config_file_collection("tag", config_file_tags, list, str)
-    _validate_config_file_collection("body_tag", config_file_body_tags, list, str)
-    _validate_config_file_collection("metaprop", config_file_metaprop, dict, str | int | bool)
+    _validate_config_file_collection("tag", config_file_md_tags, list, str)
+    _validate_config_file_collection("body_tag", config_file_md_body_tags, list, str)
+    _validate_config_file_collection("metaprop", config_file_md_metaprop, dict, str | int | bool)
     _validate_config_file_collection("filter", config_file_filters, list, str)
     _validate_config_file_collection("search", config_file_search, list, str)
     _validate_config_file_collection("not_folder", config_file_not_folder, list, str)
     _validate_config_file_collection("folder", config_file_select_folder, list, str)
 
-    note_tags = config_file_tags + (tag or [])
-    note_body_tags = config_file_body_tags + (body_tag or [])
-    note_metaprop = _merge_metaprops(config_file_metaprop, ctx_obj.export_metaprops)
+    md_tags = config_file_md_tags + (tag or [])
+    md_body_tags = config_file_md_body_tags + (body_tag or [])
+    md_metaprop = _merge_metaprops(config_file_md_metaprop, ctx_obj.export_metaprops)
     not_folder = config_file_not_folder + (not_folder or [])
     not_folder_set = {nf.lower() for nf in not_folder}
     folder = config_file_select_folder + (folder or [])
@@ -2348,14 +2350,14 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         filter_test=filter_test,
         manifest_dir=common_opts.cache_dir if use_manifest else None,
         mkdir_maxdepth=mkdir_maxdepth,
-        note_body_tags=note_body_tags or None,
-        note_metaprop=note_metaprop or None,
-        note_tags=note_tags or None,
-        notes_dir=out_dir,
-        notes_limit=limit or 0,
-        notes_mkdir=notes_mkdir,
-        place_tags_body_end=place_tags_body_end,
-        place_tags_frontmatter=place_tags_frontmatter,
+        md_body_tags=md_body_tags or None,
+        md_metaprop=md_metaprop or None,
+        md_tags=md_tags or None,
+        files_dir=out_dir,
+        files_limit=limit or 0,
+        files_mkdir=files_mkdir,
+        md_place_tags_body_end=md_place_tags_body_end,
+        md_place_tags_frontmatter=md_place_tags_frontmatter,
         search_query=search_query,
         root_out_dir=out_dir,
         with_attachments=with_attachments,
