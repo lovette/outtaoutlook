@@ -69,7 +69,6 @@ def _auth_info(auth_file_path: Path) -> None:
     console.print(f"Tenant: {cache_info.tenant}")
     console.print(f"Client: {cache_info.client}")
     console.print(f"Cached at: {cache_info.cached_at}")
-    console.print(f"Expires on: {cache_info.expires_on}")
 
 
 def _auth_init(tenant: str | None, client: str | None, auth_file_path: Path, *, force: bool) -> None:

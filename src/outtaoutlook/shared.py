@@ -10,7 +10,7 @@ import threading
 from collections import defaultdict
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from operator import itemgetter
 from pathlib import Path
@@ -71,7 +71,7 @@ GRAPH_CACHED_TOKEN_FIELDS = [
     "client_id",
     "credential_type",
     "environment",
-    "expires_on",
+    "expires_on",  # always seems to be the same as `cached_at` :/
     "extended_expires_on",
     "home_account_id",
     "realm",
@@ -216,7 +216,6 @@ class CachedAccessTokenInfo:
     client: str
     username: str
     cached_at: datetime
-    expires_on: datetime
 
 
 @dataclass
@@ -423,7 +422,6 @@ def get_token_cache_info(auth_file_path: Path) -> CachedAccessTokenInfo | None:
         tenant=account_info["home_account_id"].split(".")[1],
         username=account_info["username"],
         cached_at=datetime.fromtimestamp(int(access_token["cached_at"]), tz=timezone.utc),  # noqa: UP017
-        expires_on=datetime.fromtimestamp(int(access_token["expires_on"]), tz=timezone.utc),  # noqa: UP017
     )
 
 
@@ -1404,3 +1402,32 @@ def graph_get_resource_batch(  # noqa: PLR0913
     )
 
     return {request_id_map[int(resp["id"])]: resp for resp in data.get("responses", [])}
+
+
+def format_seconds_dhms(seconds: int, *, with_sec: bool = True) -> tuple[str, datetime]:
+    """Format a duration given in seconds into a human-readable string.
+
+    Args:
+        seconds (int): seconds
+        with_sec (bool, optional): whether to include seconds in the formatted string. Defaults to True.
+
+    Returns:
+        tuple[str, datetime]: (human-readable duration, future datetime)
+    """
+    human_parts = []
+    days, remainder = divmod(seconds, 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes, secs = divmod(remainder, 60)
+
+    if days > 0:
+        human_parts.append(f"{days}d")
+    if hours > 0:
+        human_parts.append(f"{hours}h")
+    if minutes > 0:
+        human_parts.append(f"{minutes}m")
+    if with_sec and secs > 0:
+        human_parts.append(f"{secs}s")
+
+    human = " ".join(human_parts) if human_parts else "0s"
+
+    return human, datetime_now() + timedelta(seconds=seconds)
