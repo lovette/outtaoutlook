@@ -126,6 +126,8 @@ def auth(
         typer.Option(
             help="Tenant identifier domain or UUID.",
             metavar="TENANTID",
+            envvar="OUTTAOUTLOOK_TENANTID",
+            show_envvar=False,
         ),
     ] = None,
     client: Annotated[
@@ -133,6 +135,8 @@ def auth(
         typer.Option(
             help="Application client identifier registered with Microsoft Entra admin center.",
             metavar="CLIENTID",
+            envvar="OUTTAOUTLOOK_CLIENTID",
+            show_envvar=False,
         ),
     ] = None,
     *,

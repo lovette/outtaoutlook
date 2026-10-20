@@ -10,6 +10,10 @@ verbose: 3
 
 ############################################
 # Auth command options
+#
+# Environment variables for authentication:
+# OUTTAOUTLOOK_TENANTID
+# OUTTAOUTLOOK_CLIENTID
 
 auth:
   tenant: "Tenant domain or UUID"
