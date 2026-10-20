@@ -167,7 +167,6 @@ class ExportResult:
 
     aborted: bool = False  # Whether the export was aborted.
     messages: defaultdict[int, list[str]] = field(default_factory=lambda: defaultdict(list))  # {level:[message]}
-    exported_total_count: int | None = None  # Number of messages successfully exported.
     stats: ExportStatsT | None = None  # Export statistics keyed by ExportStat.
 
 
@@ -176,8 +175,8 @@ class RemainingItemsColumn(ProgressColumn):
 
     def render(self: Self, task: Task) -> Text:  # noqa: D102
         # Prevent math bugs if total isn't set yet
-        total = int(task.total) if task.total is not None else "--"
-        remaining = int(task.remaining) if task.remaining is not None else "--"
+        total = f"{int(task.total):,}" if task.total is not None else "--"
+        remaining = f"{int(task.remaining):,}" if task.remaining is not None else "--"
 
         return Text(f"{remaining}/{total}", style="progress.remaining")
 
@@ -672,7 +671,7 @@ def _export_message(  # noqa: C901, PLR0913, PLR0917
     output_module: OutputFormatModule,
     export_opts: ExportOptions,
     export_stats: ExportStatsT,
-) -> None:
+) -> int:
     """Export a message.
 
     Args:
@@ -682,6 +681,9 @@ def _export_message(  # noqa: C901, PLR0913, PLR0917
         output_module (OutputFormatModule): The output module to use for exporting.
         export_opts (ExportOptions): Export options.
         export_stats (ExportStatsT): Export statistics dictionary to update.
+
+    Returns:
+        int: The number of exported items. May be 0 if messages are batched by output module.
 
     Raises:
         requests.RequestException derived error (e.g. ConnectionError, JSONDecodeError, HTTPError, etc.)
@@ -739,7 +741,7 @@ def _export_message(  # noqa: C901, PLR0913, PLR0917
     if not message_id:
         # I don't expect this to ever happen, but just in case.
         log_message_notice(message, "'id' field is not set!", logging.ERROR)
-        return
+        return 0
 
     _fix_dates(message, bool(is_draft))
 
@@ -756,7 +758,7 @@ def _export_message(  # noqa: C901, PLR0913, PLR0917
         skip_reason, level = ExportStat.STAT_SKIPPED_EVENT_MESSAGE, logging.DEBUG
         exportstat_incr(export_stats, skip_reason)
         log_message_notice(message, skip_reason.value, level)
-        return  # don't write empty files
+        return 0  # don't write empty files
 
     file_path = output_module.get_file_path(message, export_opts)
 
@@ -774,7 +776,7 @@ def _export_message(  # noqa: C901, PLR0913, PLR0917
         exportstat_incr(export_stats, ExportStat.STAT_ATTACHMENT_SAVED, len(attachment_paths))
 
     # Export the message in specified format.
-    output_module.export_message(
+    return output_module.export_message(
         message,
         file_path,
         attachment_paths,
@@ -831,8 +833,10 @@ def _export_folder_batch(  # noqa: PLR0913, PLR0917
     progress.update(progress_task_id, status="writing files", refresh=True)
 
     for message in messages:
+        n_exported = 1  # count processed even if in manifest
+
         if message["id"] not in exported_ids:
-            _export_message(
+            n_exported = _export_message(
                 session,
                 graph_config,
                 message,
@@ -845,7 +849,8 @@ def _export_folder_batch(  # noqa: PLR0913, PLR0917
         else:
             exportstat_incr(export_stats, ExportStat.STAT_SKIPPED_DUPLICATE)
 
-        progress.update(progress_task_id, advance=1)
+        if n_exported:
+            progress.update(progress_task_id, advance=n_exported)
 
         batch_limit -= 1
         if batch_limit <= 0:
@@ -896,9 +901,10 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0915
     progress_task_id = export_context.progress_task_id
     graph_config = export_context.graph_config
     export_opts = export_context.export_opts
+    export_stats = export_context.export_stats  # update context as progress is made
 
     folder_message_count = folder["totalItemCount"]
-    export_result = ExportResult()
+    export_result = ExportResult(stats=export_stats)
 
     if not folder_message_count:
         progress.update(progress_task_id, total=0, completed=0, status="empty folder", visible=False)
@@ -966,11 +972,6 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0915
     )
 
     export_opts = output_module.set_export_opts(export_opts)
-
-    export_stats: ExportStatsT = {
-        # Start with stats that will always be output
-        ExportStat.STAT_FILE_CREATED: 0,
-    }
 
     if export_opts.with_attachments:
         export_stats[ExportStat.STAT_ATTACHMENT_SAVED] = 0
@@ -1125,12 +1126,9 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0915
             first_batch_data = None
 
     # Let output module finish up any messages it may have queued.
-    output_module.last_batch_complete()
+    n_exported = output_module.last_batch_complete()
 
-    progress.update(progress_task_id, status="done")
-
-    export_result.exported_total_count = exported_total_count
-    export_result.stats = export_stats
+    progress.update(progress_task_id, advance=n_exported, status="done")
 
     return export_result
 
@@ -1271,6 +1269,11 @@ def _export_folder_worker(  # noqa: C901
 
     output_module_type = EXPORT_MODULES[export_opts.out_format]
 
+    export_stats: ExportStatsT = {
+        # Start with stats that will always be output
+        ExportStat.STAT_FILE_CREATED: 0,
+    }
+
     try:
         with sessions.Session() as session:
             export_context = ExportFolderContext(
@@ -1280,6 +1283,7 @@ def _export_folder_worker(  # noqa: C901
                 progress=progress,
                 progress_task_id=progress_task_id,
                 export_opts=export_opts,
+                export_stats=export_stats,  # updated as progress is made
             )
 
             return _export_folder(export_context, output_module_type(export_context))
@@ -1301,7 +1305,7 @@ def _export_folder_worker(  # noqa: C901
         # Primary thread must always release workers!
         _release_workers()
 
-    return ExportResult(aborted=True)
+    return ExportResult(aborted=True, stats=export_stats)
 
 
 def _export_folders(  # noqa: C901, PLR0912, PLR0915
@@ -1319,7 +1323,7 @@ def _export_folders(  # noqa: C901, PLR0912, PLR0915
         max_threads (int or None): Maximum size of thread pool or None to decide based on hardware.
     """
 
-    def _print_export_results(results: dict[str, tuple[GraphFolderT, ExportResult | None]]) -> None:
+    def _print_export_results(results: dict[str, tuple[GraphFolderT, ExportResult | None]]) -> None:  # noqa: C901
         # Filter export_results to items with messages or stats
         results = {
             folder_id: (folder, export_result)
@@ -1338,6 +1342,9 @@ def _export_folders(  # noqa: C901, PLR0912, PLR0915
                 console.print()
                 console.print(f"[bold]'{folder['folderPath']}'[/bold]:")
 
+                if export_result.aborted:
+                    console.print("[red]- Export did not complete[/red]")
+
                 for level, messages in export_result.messages.items():
                     for message in messages:
                         if level == logging.ERROR:
@@ -1349,7 +1356,7 @@ def _export_folders(  # noqa: C901, PLR0912, PLR0915
 
                 if export_result.stats:
                     for stat, stat_count in export_result.stats.items():
-                        console.print(f"- {stat}: {stat_count}")
+                        console.print(f"- {stat}: {stat_count:,}")
 
     # Keyword arguments to `_export_folder_worker`.
     class _WorkerArgs(TypedDict):

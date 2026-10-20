@@ -461,7 +461,7 @@ class ExportFormatMarkdown:
         attachment_paths: list[Path] | None,
         export_opts: ExportOptions,
         export_stats: ExportStatsT,
-    ) -> bool:
+    ) -> int:
         """Export a message as a Markdown file.
 
         Args:
@@ -472,17 +472,17 @@ class ExportFormatMarkdown:
             export_stats (ExportStatsT): Export statistics dictionary to update.
 
         Returns:
-            bool: True if the message was successfully exported, False otherwise.
+            int: The number of messages processed. Typically 1, but can be 0 if queued for later and >0 when processed.
 
         Raises:
             requests.RequestException derived error (e.g. ConnectionError, JSONDecodeError, HTTPError, etc.)
             OSError derived error (e.g. file system errors, permission errors, etc.)
         """
 
-        def _skip_message(skip_reason: ExportStat, level: int) -> bool:
+        def _skip_message(skip_reason: ExportStat, level: int) -> int:
             exportstat_incr(export_stats, skip_reason)
             log_message_notice(message, skip_reason.value, level)
-            return False
+            return 1
 
         tag_vars = {}
         dt_now = datetime_now()
@@ -572,7 +572,8 @@ class ExportFormatMarkdown:
 
         exportstat_incr(export_stats, ExportStat.STAT_FILE_CREATED)
 
-        return True
+        return 1
 
-    def last_batch_complete(self: Self) -> None:
+    def last_batch_complete(self: Self) -> int:
         """Called after the last batch of messages for a folder is complete.."""
+        return 0

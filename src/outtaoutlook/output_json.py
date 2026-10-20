@@ -99,7 +99,7 @@ class ExportFormatJson:
         attachment_paths: list[Path] | None,  # noqa: ARG002
         export_opts: ExportOptions,
         export_stats: ExportStatsT,
-    ) -> bool:
+    ) -> int:
         """Export a message as a JSON file.
 
         Args:
@@ -110,7 +110,7 @@ class ExportFormatJson:
             export_stats (ExportStatsT): Export statistics dictionary to update.
 
         Returns:
-            bool: True if the message was successfully exported, False otherwise.
+            int: The number of messages processed. Typically 1, but can be 0 if queued for later and >0 when processed.
 
         Raises:
             requests.RequestException derived error (e.g. ConnectionError, JSONDecodeError, HTTPError, etc.)
@@ -130,7 +130,8 @@ class ExportFormatJson:
 
         exportstat_incr(export_stats, ExportStat.STAT_FILE_CREATED)
 
-        return True
+        return 1
 
-    def last_batch_complete(self: Self) -> None:
+    def last_batch_complete(self: Self) -> int:
         """Called after the last batch of messages for a folder is complete.."""
+        return 0

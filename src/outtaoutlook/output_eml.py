@@ -107,7 +107,12 @@ class ExportFormatEml:
 
         # Private instance properties
         self._queued_messages: dict[str, MessageQueueItemT] = {}  # {message-id: MessageQueueItemT}
-        self._sequence_batch = True
+
+        # If there are multiple threads making requests, we need Graph API to execute
+        # batched individual requests in sequence so we don't hit concurrency limits.
+        self._sequence_batch = export_context.export_opts.max_workers > 1
+
+        self._batch_request_id_start = 1
 
     def set_export_opts(self: Self, export_opts: ExportOptions) -> ExportOptions:
         """Set and optionally update export options for messages in the current folder.
@@ -118,10 +123,6 @@ class ExportFormatEml:
         Returns:
             ExportOptions: Export options to use for messages in this folder.
         """
-        # We can let Graph API run batched individual requests in parallel
-        # if we're the only thread making requests.
-        self._sequence_batch = export_opts.max_workers > 1
-
         return export_opts
 
     def update_list_messages_params(self: Self, params: dict[str, str | int]) -> None:
@@ -160,7 +161,7 @@ class ExportFormatEml:
         attachment_paths: list[Path] | None,
         export_opts: ExportOptions,
         export_stats: ExportStatsT,
-    ) -> bool:
+    ) -> int:
         """Export a message as a raw .eml file.
 
         Args:
@@ -171,7 +172,7 @@ class ExportFormatEml:
             export_stats (ExportStatsT): Export statistics dictionary to update.
 
         Returns:
-            bool: True if the message was successfully exported, False otherwise.
+            int: The number of messages processed. Typically 1, but can be 0 if queued for later and >0 when processed.
 
         Raises:
             requests.RequestException derived error (e.g. ConnectionError, emlDecodeError, HTTPError, etc.)
@@ -192,19 +193,19 @@ class ExportFormatEml:
         )
 
         if len(self._queued_messages) >= REQUESTS_PER_BATCH:
-            self._flush_queue()
+            return self._flush_queue()
+        return 0
 
-        return True
-
-    def last_batch_complete(self) -> None:
+    def last_batch_complete(self: Self) -> int:
         """Called after the last batch of messages for a folder is complete.."""
         if len(self._queued_messages):
-            self._flush_queue()
+            return self._flush_queue()
+        return 0
 
     ######################################################################
     # Internal methods
 
-    def _flush_queue(self) -> None:
+    def _flush_queue(self) -> int:
         def _update_progress(status: str) -> None:
             self.export_context.progress.update(
                 self.export_context.progress_task_id,
@@ -212,14 +213,17 @@ class ExportFormatEml:
                 refresh=True,
             )
 
+        def _batch_request_id(idx: int) -> str:
+            folder_name = self.export_context.folder["displayName"]
+            return f"{folder_name}-{self._batch_request_id_start + idx}"
+
         assert len(self._queued_messages) > 0  # noqa: S101
 
-        logger.debug("Flushing batched messages queue of %d messages", len(self._queued_messages))
+        logger.debug("Processing %d queued messages", len(self._queued_messages))
 
-        _update_progress("fetching messages")
-
-        # Make a single Graph API request that contains requests for the messages in our batch.
-        urls = {message_id: f"{GRAPH_API_URL}/me/messages/{message_id}/$value" for message_id in self._queued_messages}
+        url_by_message_id = {
+            message_id: f"{GRAPH_API_URL}/me/messages/{message_id}/$value" for message_id in self._queued_messages
+        }
 
         # Create a deterministic cache key.
         cache_key = {
@@ -227,15 +231,22 @@ class ExportFormatEml:
             "ids": sorted(self._queued_messages),
         }
 
+        _update_progress("fetching messages")
+
+        # Submit a single Graph API request that returns $value for all the messages in our batch.
         responses = graph_get_resource_batch(
             self.export_context.session,
             self.export_context.graph_config,
-            urls,
+            url_by_message_id,
             sequence=self._sequence_batch,
             cache_key=cache_key,
+            short_key_factory=_batch_request_id,
         )
 
         _update_progress("writing files")
+
+        assert len(responses) == len(url_by_message_id)  # noqa: S101
+        n_messages = len(responses)
 
         for request_id, response in responses.items():
             item = self._queued_messages.pop(request_id)  # dequeue
@@ -258,7 +269,11 @@ class ExportFormatEml:
 
             self._real_export_message(item, content)
 
-    def _real_export_message(self: Self, item: MessageQueueItemT, content: str | None) -> bool:
+        self._batch_request_id_start += n_messages
+
+        return n_messages
+
+    def _real_export_message(self: Self, item: MessageQueueItemT, content: str | None) -> int:
         """Export a message as a raw .eml file.
 
         Args:
@@ -266,17 +281,17 @@ class ExportFormatEml:
             content (str | None): The raw content of the message, or None if not available.
 
         Returns:
-            bool: True if the message was successfully exported, False otherwise.
+            int: The number of messages processed. Typically 1, but can be 0 if queued for later and >0 when processed.
 
         Raises:
             requests.RequestException derived error (e.g. ConnectionError, emlDecodeError, HTTPError, etc.)
             OSError derived error (e.g. file system errors, permission errors, etc.)
         """
 
-        def _skip_message(skip_reason: ExportStat, level: int) -> bool:
+        def _skip_message(skip_reason: ExportStat, level: int) -> int:
             exportstat_incr(item.export_stats, skip_reason)
             log_message_notice(item.message, skip_reason.value, level)
-            return False
+            return 1
 
         file_date = item.message["messageDateTime"]
         has_attachments = item.message.get("hasAttachments")
@@ -295,4 +310,4 @@ class ExportFormatEml:
 
         exportstat_incr(item.export_stats, ExportStat.STAT_FILE_CREATED)
 
-        return True
+        return 1

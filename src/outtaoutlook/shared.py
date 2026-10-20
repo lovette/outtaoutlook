@@ -1,5 +1,7 @@
 """outtaoutlook shared variables and functions."""
 
+import base64
+import binascii
 import hashlib
 import json
 import logging
@@ -8,7 +10,7 @@ import re
 import textwrap
 import threading
 from collections import defaultdict
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
@@ -317,6 +319,7 @@ class ExportFolderContext:
     progress: Progress
     progress_task_id: TaskID
     export_opts: ExportOptions
+    export_stats: ExportStatsT
 
 
 ExportStatsT = dict[ExportStat, int]
@@ -1163,6 +1166,23 @@ def _get_cached_response(cache_file_path: Path, req_url: str, cache_json_header:
     return response["content"]
 
 
+def _get_content_type_field(json_data: dict[str, Any], json_field: str) -> str | None:
+    """Extract the Content-Type field from a JSON object.
+
+    Args:
+        json_data (dict[str, Any]): The JSON object.
+        json_field (str): The name of the field.
+
+    Returns:
+        str | None: The content type if present, otherwise None.
+    """
+    # e.g. "application/json; odata.metadata=minimal; odata.streaming=true; IEEE754Compatible=false; charset=utf-8"
+    content_type = json_data.get(json_field)
+    if content_type is None:
+        return None
+    return content_type.split(";", 1)[0].strip().lower()
+
+
 def _get_content_as_json(resp: requests.Response) -> dict[str, Any]:
     """Return response content as a JSON object, even if server replies with another content type.
 
@@ -1227,35 +1247,77 @@ def _write_cached_response(
         )
 
 
-def _batch_raise_for_status(url: str, resp: requests.Response, resp_json: dict[str, Any]) -> None:
+def _batch_raise_for_status(  # noqa: C901
+    url: str,
+    http_resp: requests.Response,
+    response_json: dict[str, Any],
+    payload_json: dict[str, Any],
+) -> None:
     """Raise an HTTPError exception if any batch individual responses returned an error code.
 
     Args:
         url (str): The URL.
-        resp (requests.Response): The POST response.
-        resp_json (dict[str, Any]): The JSON response from the batch request.
+        http_resp (requests.Response): The POST response.
+        response_json (dict[str, Any]): The JSON response from the batch request.
+        payload_json (dict[str, Any]): The POST request JSON payload.
 
     Raises:
         requests.HTTPError
     """
-    # The batch response contains an array of individual responses.
-    for response in resp_json.get("responses", []):
-        status_code = response.get("status")
-        if status_code == 200:  # noqa: PLR2004
-            return
 
-        error = response.get("body", {}).get("error", {})
-        code = error.get("code")  # BadRequest
-        message = error.get("message")  # "Resource not found for the segment 'messages'."
+    def _decode_blob(body: str) -> tuple[str, str]:
+        code = "--"
+
+        try:
+            body = base64.b64decode(body).decode("utf-8")
+        except binascii.Error as err:
+            message = f"Unexpected batch request error response body: {body}; {err}"
+        else:
+            json_body = json.loads(body)
+
+            if isinstance(json_body, dict):
+                error = json_body.get("error", {})
+                code = error.get("code")  # BadRequest
+                message = error.get("message")  # "Resource not found for the segment 'messages'."
+            else:
+                message = f"Unexpected batch request error response body: {body}"
+
+        return code, message
+
+    # The batch response contains an array of individual responses.
+    for response in response_json.get("responses", []):
+        status_code = int(response.get("status", 0))
+        if status_code == 200:  # noqa: PLR2004
+            continue
+
+        request_id = response.get("id")
+        headers = response.get("headers", {})
+        content_type = _get_content_type_field(headers, "Content-Type")
+        body = response.get("body")
+        code = "--"
+
+        # See if we can get URL for individual request
+        request_url_by_id = {req.get("id"): req.get("url") for req in payload_json.get("requests", [])}
+        url = request_url_by_id.get(request_id, url) if request_id else url
+
+        if content_type != "application/json":
+            message = f"Unexpected error response content type '{content_type}'"
+        elif isinstance(body, dict):
+            error = body.get("error", {})
+            code = error.get("code")  # BadRequest
+            message = error.get("message")  # "Resource not found for the segment 'messages'."
+        else:
+            # The headers don't indicate Base64 encoded JSON, but it probably is.
+            code, message = _decode_blob(body)
 
         if 400 <= status_code < 500:  # noqa: PLR2004
-            http_error_msg = f"{message} {status_code} Client Error: {code} for url: {url}"
+            http_error_msg = f"{message} {status_code} Client Error: {code} for url in batch: {url}"
         elif 500 <= status_code < 600:  # noqa: PLR2004
-            http_error_msg = f"{message} {status_code} Server Error: {code} for url: {url}"
+            http_error_msg = f"{message} {status_code} Server Error: {code} for url in batch: {url}"
         else:
-            http_error_msg = f"{message} {status_code} Unexpected Error: {code} for url: {url}"
+            http_error_msg = f"{message} {status_code} Unexpected Error: {code} for url in batch: {url}"
 
-        raise requests.HTTPError(http_error_msg, response=resp)
+        raise requests.HTTPError(http_error_msg, response=http_resp)
 
 
 def graph_post_resource(  # noqa: PLR0913, PLR0917
@@ -1317,7 +1379,7 @@ def graph_post_resource(  # noqa: PLR0913, PLR0917
     resp_json = _get_content_as_json(resp)
 
     if url.endswith("/$batch"):
-        _batch_raise_for_status(url, resp, resp_json)
+        _batch_raise_for_status(url, resp, resp_json, json_data)
 
     if cache_file_path:
         _write_cached_response(cache_file_path, cache_json_header, resp, resp_json)
@@ -1334,6 +1396,7 @@ def graph_get_resource_batch(  # noqa: PLR0913
     headers: dict[str, Any] | None = None,
     cache_key: dict[str, Any] | None = None,
     sequence: bool = True,
+    short_key_factory: Callable[[int], str] | None = None,
 ) -> dict[str, GraphApiReturnT]:
     """Execute a batch of GET request to Microsoft Graph API.
 
@@ -1352,6 +1415,7 @@ def graph_get_resource_batch(  # noqa: PLR0913
         headers (dict, optional): HTTP headers for the GET request. Defaults to None.
         cache_key (dict, optional): Cache key for the batch request. Defaults to requested URLs if not provided.
         sequence (bool, optional): True if individual batched requests should be executed in sequence. Defaults to True.
+        short_key_factory (Callable[[int], str], optional): Factory function to generate short request IDs. Defaults to None.
 
     Returns:
         dict[str, GraphApiReturnT]: Dictionary mapping request IDs to their JSON responses.
@@ -1370,16 +1434,20 @@ def graph_get_resource_batch(  # noqa: PLR0913
         "sequenced" if sequence else "parallel",
     )
 
-    depends_id = 0
+    depends_id: str | None = None
     requests: list[dict[str, Any]] = []
-    request_id_map: dict[int, str] = {}
+    request_id_map: dict[str, str] = {}
 
     for request_id, url in urls.items():
-        # Outlook message IDs are too long to be used as batch request ID
-        short_id = len(requests) + 1
-        request_id_map[short_id] = request_id
+        short_id: str = request_id
 
-        request: dict[str, str | int | list[int]] = {
+        # I can't find an official statement, but experience says Graph API truncates long IDs.
+        # As a convenience, we can translate long IDs into shorter batch specific IDs.
+        if short_key_factory is not None:
+            short_id = short_key_factory(len(requests) + 1)
+            request_id_map[short_id] = request_id
+
+        request: dict[str, str | list[str]] = {
             "id": short_id,
             "method": "GET",
             "url": url.removeprefix(GRAPH_API_URL),
@@ -1401,7 +1469,11 @@ def graph_get_resource_batch(  # noqa: PLR0913
         cache_key=cache_key,
     )
 
-    return {request_id_map[int(resp["id"])]: resp for resp in data.get("responses", [])}
+    responses = data.get("responses", [])
+
+    if request_id_map:
+        return {request_id_map[resp["id"]]: resp for resp in responses}
+    return {resp["id"]: resp for resp in responses}
 
 
 def format_seconds_dhms(seconds: int, *, with_sec: bool = True) -> tuple[str, datetime]:

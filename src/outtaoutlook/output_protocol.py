@@ -69,7 +69,7 @@ class OutputFormatModule(Protocol):
         attachment_paths: list[Path] | None,
         export_opts: ExportOptions,
         export_stats: ExportStatsT,
-    ) -> bool:
+    ) -> int:
         """Export a message as an output file.
 
         Args:
@@ -80,7 +80,7 @@ class OutputFormatModule(Protocol):
             export_stats (ExportStatsT): Export statistics dictionary to update.
 
         Returns:
-            bool: True if the message was successfully exported, False otherwise.
+            int: The number of messages processed. Typically 1, but can be 0 if queued for later and >0 when processed.
 
         Raises:
             requests.RequestException derived error (e.g. ConnectionError, JSONDecodeError, HTTPError, etc.)
@@ -88,6 +88,6 @@ class OutputFormatModule(Protocol):
         """
         ...
 
-    def last_batch_complete(self: Self) -> None:
+    def last_batch_complete(self: Self) -> int:
         """Called after the last batch of messages for a folder is complete.."""
         ...
