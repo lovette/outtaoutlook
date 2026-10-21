@@ -5,8 +5,7 @@ from typing import TYPE_CHECKING, Protocol, Self
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from outtaoutlook.commands.export import ExportFolderContext
-    from outtaoutlook.shared import ExportOptions, ExportStatsT, GraphFolderT, GraphMessageT
+    from outtaoutlook.shared import ExportFolderContext, ExportOptions, ExportStatsT, GraphMessageT
 
 
 ######################################################################

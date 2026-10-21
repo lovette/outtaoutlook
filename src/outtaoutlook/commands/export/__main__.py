@@ -28,10 +28,6 @@ from requests import sessions
 from rich.progress import BarColumn, Progress, ProgressColumn, SpinnerColumn, Task, TaskID, TextColumn
 from rich.text import Text
 
-from outtaoutlook.output_eml import ExportFormatEml
-from outtaoutlook.output_html import ExportFormatHtml
-from outtaoutlook.output_json import ExportFormatJson
-from outtaoutlook.output_md import ExportFormatMarkdown
 from outtaoutlook.shared import (
     APP_NAME,
     AUTH_ERROR_USECOMMAND,
@@ -72,10 +68,15 @@ from outtaoutlook.shared import (
     unique_file_path,
 )
 
+from .output_eml import ExportFormatEml
+from .output_html import ExportFormatHtml
+from .output_json import ExportFormatJson
+from .output_md import ExportFormatMarkdown
+
 if TYPE_CHECKING:
     from collections.abc import Generator
 
-    from outtaoutlook.output_protocol import OutputFormatModule
+    from .output_protocol import OutputFormatModule
 
 ######################################################################
 # Global variables
