@@ -2,23 +2,18 @@
 
 import json
 from datetime import datetime
-from pathlib import Path
 from typing import TYPE_CHECKING, Self
 
-from outtaoutlook.shared import (
-    unique_file_path,
-)
-
+from .output import OutputWorkerCore
 from .shared import (
-    ExportFolderContext,
-    ExportOptions,
     ExportStat,
-    ExportStatsT,
     exportstat_incr,
     write_output_file,
 )
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from outtaoutlook.graphapi import GraphMessageT
 
 ######################################################################
@@ -48,27 +43,8 @@ def _json_serial(obj: object) -> str:
 # Public module class
 
 
-class ExportFormatJson:
-    """Implements the `OutputFormatModule` protocol for JSON output."""
-
-    def __init__(self, export_context: ExportFolderContext) -> None:
-        """Object constructor.
-
-        Args:
-            export_context (ExportFolderContext): Context for the folder being exported.
-        """
-        self.export_context = export_context
-
-    def set_export_opts(self: Self, export_opts: ExportOptions) -> ExportOptions:
-        """Set and optionally update export options for messages in the current folder.
-
-        Args:
-            export_opts (ExportOptions): Base export options.
-
-        Returns:
-            ExportOptions: Export options to use for messages in this folder.
-        """
-        return export_opts
+class OutputWorkerJson(OutputWorkerCore):
+    """Implements the `OutputWorkerCore` for JSON output."""
 
     def update_list_messages_params(self: Self, params: dict[str, str | int]) -> None:
         """Update parameters used in the '/messages' Graph API request.
@@ -81,29 +57,22 @@ class ExportFormatJson:
     def get_file_path(
         self: Self,
         message: GraphMessageT,
-        export_opts: ExportOptions,
     ) -> Path:
         """Generate a prospective path to an output file.
 
         Args:
             message (GraphMessageT): The message.
-            export_opts (ExportOptions): Export options.
 
         Returns:
             Path
         """
-        title = message["fileTitle"]
-        file_date = message["messageDateTime"]
-
-        return unique_file_path(export_opts.files_dir / Path(title + ".json"), file_date)
+        return super().get_file_path(message).with_suffix(".json")
 
     def export_message(
         self: Self,
         message: GraphMessageT,
         file_path: Path,
         attachment_paths: list[Path] | None,  # noqa: ARG002
-        export_opts: ExportOptions,
-        export_stats: ExportStatsT,
     ) -> int:
         """Export a message as a JSON file.
 
@@ -111,8 +80,6 @@ class ExportFormatJson:
             message (GraphMessageT): The message.
             file_path (Path): Prospective path to the output file to write.
             attachment_paths (list[Path] | None): List of attachment file paths or None if no attachments.
-            export_opts (ExportOptions): Export options.
-            export_stats (ExportStatsT): Export statistics dictionary to update.
 
         Returns:
             int: The number of messages processed. Typically 1, but can be 0 if queued for later and >0 when processed.
@@ -131,12 +98,8 @@ class ExportFormatJson:
 
         file_text = json.dumps(message_copy, sort_keys=True, default=_json_serial)
 
-        write_output_file(file_path, file_text, file_date, export_opts)
+        write_output_file(file_path, file_text, file_date, self.export_opts)
 
-        exportstat_incr(export_stats, ExportStat.STAT_FILE_CREATED)
+        exportstat_incr(self.export_stats, ExportStat.STAT_FILE_CREATED)
 
         return 1
-
-    def last_batch_complete(self: Self) -> int:
-        """Called after the last batch of messages for a folder is complete.."""
-        return 0

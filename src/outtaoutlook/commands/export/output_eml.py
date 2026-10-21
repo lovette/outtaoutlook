@@ -4,39 +4,33 @@ import base64
 import binascii
 import logging
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING, Self
 
 from outtaoutlook.graphapi import (
     GRAPH_API_URL,
-    GraphApiConfig,
     GraphMessageT,
-    graph_get_resource,
     graph_get_resource_batch,
     log_message_notice,
 )
 from outtaoutlook.shared import (
     ExportAbortedError,
     logger,
-    unique_file_path,
 )
 
+from .output import OutputWorkerCore
 from .shared import (
-    ExportFolderContext,
-    ExportOptions,
     ExportStat,
-    ExportStatsT,
     abort_workers_event,
     exportstat_incr,
     write_output_file,
 )
 
 if TYPE_CHECKING:
-    from requests import sessions
-
+    from pathlib import Path
 
 ######################################################################
 # Constants
+
 
 # Message fields we reference for exporting.
 # We need subject for log messages and dates for file name and timestamp.
@@ -57,6 +51,7 @@ SELECT_MESSAGE_FIELDS = ",".join(
 
 REQUESTS_PER_BATCH = 20  # Graph API limit
 
+
 ######################################################################
 # Types and classes
 
@@ -68,69 +63,27 @@ class MessageQueueItemT:
     message: GraphMessageT
     file_path: Path
     attachment_paths: list[Path] | None
-    export_opts: ExportOptions
-    export_stats: ExportStatsT
-
-
-######################################################################
-# Helpers
-
-
-def _get_raw_message(
-    session: sessions.Session,
-    graph_config: GraphApiConfig,
-    message: GraphMessageT,
-) -> tuple[str | None, str | None]:
-    """Get raw content for a message.
-
-    Args:
-        session (sessions.Session): Requests session to pool requests.
-        graph_config (GraphApiConfig): Graph API configuration.
-        message (GraphMessageT): Message properties.
-
-    Returns:
-        tuple[str | None, str | None]: (content, content type)
-    """
-    url = f"{GRAPH_API_URL}/me/messages/{message.get('id')}/$value"
-    data = graph_get_resource(session, graph_config, url)
-    content, content_type = data.get("contentBytes"), data.get("contentType")
-    return content, content_type
 
 
 ######################################################################
 # Public module class
 
 
-class ExportFormatEml:
-    """Implements the `OutputFormatModule` protocol for EML output."""
+class OutputWorkerEml(OutputWorkerCore):
+    """Implements the `OutputWorkerCore` for EML output."""
 
-    def __init__(self, export_context: ExportFolderContext) -> None:
-        """Object constructor.
-
-        Args:
-            export_context (ExportFolderContext): Context for the folder being exported.
-        """
-        self.export_context = export_context
+    def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+        """Object constructor."""
+        super().__init__(*args, **kwargs)
 
         # Private instance properties
         self._queued_messages: dict[str, MessageQueueItemT] = {}  # {message-id: MessageQueueItemT}
 
         # If there are multiple threads making requests, we need Graph API to execute
         # batched individual requests in sequence so we don't hit concurrency limits.
-        self._sequence_batch = export_context.export_opts.max_workers > 1
+        self._sequence_batch = self.export_opts.max_workers > 1
 
         self._batch_request_id_start = 1
-
-    def set_export_opts(self: Self, export_opts: ExportOptions) -> ExportOptions:
-        """Set and optionally update export options for messages in the current folder.
-
-        Args:
-            export_opts (ExportOptions): Base export options.
-
-        Returns:
-            ExportOptions: Export options to use for messages in this folder.
-        """
-        return export_opts
 
     def update_list_messages_params(self: Self, params: dict[str, str | int]) -> None:
         """Update parameters used in the '/messages' Graph API request.
@@ -145,29 +98,22 @@ class ExportFormatEml:
     def get_file_path(
         self: Self,
         message: GraphMessageT,
-        export_opts: ExportOptions,
     ) -> Path:
         """Generate a prospective path to an output file.
 
         Args:
             message (GraphMessageT): The message.
-            export_opts (ExportOptions): Export options.
 
         Returns:
             Path
         """
-        title = message["fileTitle"]
-        file_date = message["messageDateTime"]
-
-        return unique_file_path(export_opts.files_dir / Path(title + ".eml"), file_date)
+        return super().get_file_path(message).with_suffix(".eml")
 
     def export_message(
         self: Self,
         message: GraphMessageT,
         file_path: Path,
         attachment_paths: list[Path] | None,
-        export_opts: ExportOptions,
-        export_stats: ExportStatsT,
     ) -> int:
         """Export a message as a raw .eml file.
 
@@ -175,8 +121,6 @@ class ExportFormatEml:
             message (GraphMessageT): The message.
             file_path (Path): Prospective path to the output file to write.
             attachment_paths (list[Path] | None): List of attachment file paths or None if no attachments.
-            export_opts (ExportOptions): Export options.
-            export_stats (ExportStatsT): Export statistics dictionary to update.
 
         Returns:
             int: The number of messages processed. Typically 1, but can be 0 if queued for later and >0 when processed.
@@ -195,8 +139,6 @@ class ExportFormatEml:
             message=message,
             file_path=file_path,
             attachment_paths=attachment_paths,
-            export_opts=export_opts,
-            export_stats=export_stats,
         )
 
         if len(self._queued_messages) >= REQUESTS_PER_BATCH:
@@ -214,14 +156,14 @@ class ExportFormatEml:
 
     def _flush_queue(self) -> int:
         def _update_progress(status: str) -> None:
-            self.export_context.progress.update(
-                self.export_context.progress_task_id,
+            self.progress.update(
+                self.progress_task_id,
                 status=status,
                 refresh=True,
             )
 
         def _batch_request_id(idx: int) -> str:
-            folder_name = self.export_context.folder["displayName"]
+            folder_name = self.folder["displayName"]
             return f"{folder_name}-{self._batch_request_id_start + idx}"
 
         assert len(self._queued_messages) > 0  # noqa: S101
@@ -242,8 +184,8 @@ class ExportFormatEml:
 
         # Submit a single Graph API request that returns $value for all the messages in our batch.
         responses = graph_get_resource_batch(
-            self.export_context.session,
-            self.export_context.graph_config,
+            self.session,
+            self.graph_config,
             url_by_message_id,
             sequence=self._sequence_batch,
             cache_key=cache_key,
@@ -299,7 +241,7 @@ class ExportFormatEml:
         """
 
         def _skip_message(skip_reason: ExportStat, level: int) -> int:
-            exportstat_incr(item.export_stats, skip_reason)
+            exportstat_incr(self.export_stats, skip_reason)
             log_message_notice(item.message, skip_reason.value, level)
             return 1
 
@@ -309,15 +251,15 @@ class ExportFormatEml:
         if not content:
             if content is None:
                 return _skip_message(ExportStat.STAT_SKIPPED_NO_MESSAGE_BODY, logging.WARNING)
-            if has_attachments and item.export_opts.with_attachments:
+            if has_attachments and self.export_opts.with_attachments:
                 content = ""  # content will be links to attachments
             if not has_attachments:
                 return _skip_message(ExportStat.STAT_SKIPPED_NO_MESSAGE_CONTENT_NO_ATTACHMENTS, logging.INFO)
-            if not item.export_opts.with_attachments:
+            if not self.export_opts.with_attachments:
                 return _skip_message(ExportStat.STAT_SKIPPED_NO_MESSAGE_CONTENT_JUST_ATTACHMENTS, logging.INFO)
 
-        write_output_file(item.file_path, content, file_date, item.export_opts)
+        write_output_file(item.file_path, content, file_date, self.export_opts)
 
-        exportstat_incr(item.export_stats, ExportStat.STAT_FILE_CREATED)
+        exportstat_incr(self.export_stats, ExportStat.STAT_FILE_CREATED)
 
         return 1

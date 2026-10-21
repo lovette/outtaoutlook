@@ -27,18 +27,14 @@ from outtaoutlook.shared import (
     logger,
 )
 
-from .output import export_folder
-from .output_eml import ExportFormatEml
-from .output_html import ExportFormatHtml
-from .output_json import ExportFormatJson
-from .output_md import ExportFormatMarkdown
+from .output_eml import OutputWorkerEml
+from .output_html import OutputWorkerHtml
+from .output_json import OutputWorkerJson
+from .output_md import OutputWorkerMarkdown
 from .shared import (
     MAX_EXPORT_WORKERS,
-    ExportFolderContext,
     ExportOptions,
     ExportResult,
-    ExportStat,
-    ExportStatsT,
     OutputFormatChoice,
     abort_workers_event,
     list_messages_success_event,
@@ -48,7 +44,7 @@ from .shared import (
 if TYPE_CHECKING:
     from collections.abc import Generator
 
-    from .output_protocol import OutputFormatModule
+    from .output import OutputWorkerCore
 
 
 ######################################################################
@@ -70,11 +66,11 @@ thread_id_counter = 0
 LIST_MESSAGES_SUCCESS_EVENT_WAIT = 60  # seconds; just a failsafe, I don't expect there to be any deadlocking :)
 FOLDER_ICON = "\N{OPEN FILE FOLDER}\N{NARROW NO-BREAK SPACE}"
 
-EXPORT_MODULES: dict[OutputFormatChoice, type[OutputFormatModule]] = {
-    OutputFormatChoice.eml: ExportFormatEml,
-    OutputFormatChoice.md: ExportFormatMarkdown,
-    OutputFormatChoice.html: ExportFormatHtml,
-    OutputFormatChoice.json: ExportFormatJson,
+EXPORT_MODULES: dict[OutputFormatChoice, type[OutputWorkerCore]] = {
+    OutputFormatChoice.eml: OutputWorkerEml,
+    OutputFormatChoice.md: OutputWorkerMarkdown,
+    OutputFormatChoice.html: OutputWorkerHtml,
+    OutputFormatChoice.json: OutputWorkerJson,
 }
 
 
@@ -244,14 +240,8 @@ def _worker_main(
     if abort_workers_event.is_set():
         return ExportResult(aborted=True)
 
-    output_module_type = EXPORT_MODULES[export_opts.out_format]
-
-    export_stats: ExportStatsT = {
-        # Start with stats that will always be output
-        ExportStat.STAT_FILE_CREATED: 0,
-    }
-
-    export_result = ExportResult(stats=export_stats)
+    export_result = ExportResult()
+    export_module_class = EXPORT_MODULES[export_opts.out_format]
 
     _emit_log(folder, "Working on this folder...", logging.DEBUG)
 
@@ -260,7 +250,7 @@ def _worker_main(
 
     try:
         with sessions.Session() as session:
-            export_context = ExportFolderContext(
+            export_module = export_module_class(
                 thread_id=thread_local_data.thread_id,
                 folder=folder,
                 session=session,
@@ -268,10 +258,13 @@ def _worker_main(
                 progress=progress,
                 progress_task_id=progress_task_id,
                 export_opts=export_opts,
-                export_stats=export_stats,  # updated as progress is made
             )
 
-            return export_folder(export_context, output_module_type(export_context))
+            # Assign stats to the result now so stats updated as progress is made
+            # are reported even in the event an exception occurs.
+            export_result.stats = export_module.export_stats
+
+            return export_module.export()
 
     except requests.RequestException as err:
         print_graph_request_exception(progress.console, err)

@@ -1,6 +1,5 @@
 """Export messages as Markdown files."""
 
-import copy
 import logging
 import re
 import unicodedata
@@ -18,20 +17,19 @@ from outtaoutlook.graphapi import GraphFolderT, GraphMessageT, log_message_notic
 from outtaoutlook.shared import (
     FileMetaPropT,
     datetime_now,
-    unique_file_path,
 )
 
+from .output import OutputWorkerCore
 from .shared import (
-    ExportFolderContext,
     ExportOptions,
     ExportStat,
-    ExportStatsT,
     exportstat_incr,
     write_output_file,
 )
 
 ######################################################################
 # Constants
+
 
 # Tag and property variables in the format '{tag.propertyName}'
 RE_TAG_VAR = re.compile(r"{[a-zA-Z.]+}")
@@ -53,8 +51,10 @@ SELECT_MESSAGE_FIELDS = ",".join(
     ),
 )
 
+
 ######################################################################
 # Types and classes
+
 
 FrontmatterT = dict[str, str | int | Decimal | bool | Sequence[str | int]]
 
@@ -393,40 +393,20 @@ def _md_link_text(rel_path_or_uri: str, *, inline: bool) -> str:
 # Public module class
 
 
-class ExportFormatMarkdown:
-    """Implements the `OutputFormatModule` protocol for Markdown output."""
+class OutputWorkerMarkdown(OutputWorkerCore):
+    """Implements the `OutputWorkerCore` for Markdown output."""
 
-    def __init__(self, export_context: ExportFolderContext) -> None:
-        """Object constructor.
-
-        Args:
-            export_context (ExportFolderContext): Context for the folder being exported.
-        """
-        self.export_context = export_context
-
-    def set_export_opts(self: Self, export_opts: ExportOptions) -> ExportOptions:
-        """Set and optionally update export options for messages in the current folder.
-
-        Args:
-            export_opts (ExportOptions): Base export options.
-
-        Returns:
-            ExportOptions: Export options to use for messages in this folder.
-        """
-        folder = self.export_context.folder
-
+    def set_export_opts(self: Self) -> None:
+        """Set and optionally update export options for messages in the current folder."""
         # Dynamic variables that can be referenced in tags and metadata properties.
         folder_tag_vars = {
-            "{folder.displayName}": folder["displayName"],
-            "{folder.folderPath}": folder["folderPath"],
+            "{folder.displayName}": self.folder["displayName"],
+            "{folder.folderPath}": self.folder["folderPath"],
         }
 
-        return copy.replace(
-            export_opts,
-            md_tags=_expand_folder_tags(folder, export_opts.md_tags, folder_tag_vars),
-            md_body_tags=_expand_folder_tags(folder, export_opts.md_body_tags, folder_tag_vars),
-            md_metaprop=_expand_folder_metaprop(folder, export_opts.md_metaprop, folder_tag_vars),
-        )
+        self.export_opts.md_tags = _expand_folder_tags(self.folder, self.export_opts.md_tags, folder_tag_vars)
+        self.export_opts.md_body_tags = _expand_folder_tags(self.folder, self.export_opts.md_body_tags, folder_tag_vars)
+        self.export_opts.md_metaprop = _expand_folder_metaprop(self.folder, self.export_opts.md_metaprop, folder_tag_vars)
 
     def update_list_messages_params(self: Self, params: dict[str, str | int]) -> None:
         """Update parameters used in the '/messages' Graph API request.
@@ -439,29 +419,22 @@ class ExportFormatMarkdown:
     def get_file_path(
         self: Self,
         message: GraphMessageT,
-        export_opts: ExportOptions,
     ) -> Path:
         """Generate a prospective path to an output file.
 
         Args:
             message (GraphMessageT): The message.
-            export_opts (ExportOptions): Export options.
 
         Returns:
             Path
         """
-        title = message["fileTitle"]
-        file_date = message["messageDateTime"]
-
-        return unique_file_path(export_opts.files_dir / Path(title + ".md"), file_date)
+        return super().get_file_path(message).with_suffix(".md")
 
     def export_message(  # noqa: C901, PLR0912
         self: Self,
         message: GraphMessageT,
         file_path: Path,
         attachment_paths: list[Path] | None,
-        export_opts: ExportOptions,
-        export_stats: ExportStatsT,
     ) -> int:
         """Export a message as a Markdown file.
 
@@ -469,8 +442,6 @@ class ExportFormatMarkdown:
             message (GraphMessageT): The message.
             file_path (Path): Prospective path to the output file to write.
             attachment_paths (list[Path] | None): List of attachment file paths or None if no attachments.
-            export_opts (ExportOptions): Export options.
-            export_stats (ExportStatsT): Export statistics dictionary to update.
 
         Returns:
             int: The number of messages processed. Typically 1, but can be 0 if queued for later and >0 when processed.
@@ -481,7 +452,7 @@ class ExportFormatMarkdown:
         """
 
         def _skip_message(skip_reason: ExportStat, level: int) -> int:
-            exportstat_incr(export_stats, skip_reason)
+            exportstat_incr(self.export_stats, skip_reason)
             log_message_notice(message, skip_reason.value, level)
             return 1
 
@@ -506,11 +477,11 @@ class ExportFormatMarkdown:
                 return _skip_message(ExportStat.STAT_SKIPPED_NO_MESSAGE_BODY, logging.WARNING)
             if file_body is None:
                 return _skip_message(ExportStat.STAT_SKIPPED_MARKDOWN_CONVERSION_FAILED, logging.WARNING)
-            if has_attachments and export_opts.with_attachments:
+            if has_attachments and self.export_opts.with_attachments:
                 file_body = ""  # content will be links to attachments
             if not has_attachments:
                 return _skip_message(ExportStat.STAT_SKIPPED_NO_MESSAGE_CONTENT_NO_ATTACHMENTS, logging.INFO)
-            if not export_opts.with_attachments:
+            if not self.export_opts.with_attachments:
                 return _skip_message(ExportStat.STAT_SKIPPED_NO_MESSAGE_CONTENT_JUST_ATTACHMENTS, logging.INFO)
 
         if file_body is None:
@@ -544,12 +515,12 @@ class ExportFormatMarkdown:
         # Link to attachments
         if attachment_paths:
             inline = len(attachment_paths) == 1 and not file_body  # File consists of a single inline link
-            rel_links = _attachment_abs_to_rel(attachment_paths, file_path.parent, export_opts.root_out_dir)
+            rel_links = _attachment_abs_to_rel(attachment_paths, file_path.parent, self.export_opts.root_out_dir)
             attachment_links = [_md_link_text(rel_path_or_uri, inline=inline) for rel_path_or_uri in rel_links]
 
-        frontmatter = _init_file_frontmatter(export_opts.md_metaprop, metaprop_vars)
+        frontmatter = _init_file_frontmatter(self.export_opts.md_metaprop, metaprop_vars)
 
-        file_body = _append_md_tags(file_body, export_opts, tag_vars, frontmatter)
+        file_body = _append_md_tags(file_body, self.export_opts, tag_vars, frontmatter)
 
         if frontmatter:
             # Frontmatter goes first
@@ -569,12 +540,8 @@ class ExportFormatMarkdown:
 
         file_text = "\n".join(file_content).strip() + "\n"
 
-        write_output_file(file_path, file_text, file_date, export_opts)
+        write_output_file(file_path, file_text, file_date, self.export_opts)
 
-        exportstat_incr(export_stats, ExportStat.STAT_FILE_CREATED)
+        exportstat_incr(self.export_stats, ExportStat.STAT_FILE_CREATED)
 
         return 1
-
-    def last_batch_complete(self: Self) -> int:
-        """Called after the last batch of messages for a folder is complete.."""
-        return 0

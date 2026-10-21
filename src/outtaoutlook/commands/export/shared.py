@@ -13,10 +13,6 @@ if TYPE_CHECKING:
     from datetime import datetime
     from pathlib import Path
 
-    from requests import sessions
-    from rich.progress import Progress, TaskID
-
-    from outtaoutlook.graphapi import GraphApiConfig, GraphFolderT
     from outtaoutlook.shared import FileMetaPropT
 
 ######################################################################
@@ -94,20 +90,6 @@ class ExportResult:
     aborted: bool = False  # Whether the export was aborted.
     messages: defaultdict[int, list[str]] = field(default_factory=lambda: defaultdict(list))  # {level:[message]}
     stats: ExportStatsT | None = None  # Export statistics keyed by ExportStat.
-
-
-@dataclass
-class ExportFolderContext:
-    """Context for exporting a folder."""
-
-    thread_id: int
-    folder: GraphFolderT
-    session: sessions.Session
-    graph_config: GraphApiConfig
-    progress: Progress
-    progress_task_id: TaskID
-    export_opts: ExportOptions
-    export_stats: ExportStatsT
 
 
 ######################################################################
