@@ -12,23 +12,25 @@ import typer
 import yaml
 from requests import sessions
 
-from outtaoutlook.shared import (
+from outtaoutlook.graphapi import (
     AUTH_ERROR_USECOMMAND,
     GRAPH_API_BATCH_MAX,
     GRAPH_API_BATCH_MIN,
     MAILBOX_ROOT,
+    GraphAuthRequiredError,
+    get_graph_config,
+    graph_resolve_folder_paths,
+    print_graph_request_exception,
+)
+from outtaoutlook.shared import (
     CommandContext,
     ExportAbortedError,
     ExportError,
     FileMetaPropT,
-    GraphAuthRequiredError,
     console,
     err_console,
-    get_graph_config,
-    graph_resolve_folder_paths,
     logger,
     path_with_vars,
-    print_graph_request_exception,
     safe_file_name,
 )
 

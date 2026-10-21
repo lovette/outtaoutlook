@@ -16,7 +16,8 @@ if TYPE_CHECKING:
     from requests import sessions
     from rich.progress import Progress, TaskID
 
-    from outtaoutlook.shared import FileMetaPropT, GraphApiConfig, GraphFolderT
+    from outtaoutlook.graphapi import GraphApiConfig, GraphFolderT
+    from outtaoutlook.shared import FileMetaPropT
 
 ######################################################################
 # Constants

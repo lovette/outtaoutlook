@@ -13,17 +13,19 @@ from requests import sessions
 from rich.progress import BarColumn, Progress, ProgressColumn, SpinnerColumn, Task, TaskID, TextColumn
 from rich.text import Text
 
-from outtaoutlook.shared import (
+from outtaoutlook.graphapi import (
     AUTH_ERROR_USECOMMAND,
-    ExportAbortedError,
-    ExportError,
     GraphApiConfig,
     GraphAuthRequiredError,
     GraphFolderT,
+    print_graph_request_exception,
+)
+from outtaoutlook.shared import (
+    ExportAbortedError,
+    ExportError,
     abort_workers_event,
     console,
     logger,
-    print_graph_request_exception,
 )
 
 from .output import export_folder

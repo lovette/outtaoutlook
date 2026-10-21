@@ -14,21 +14,23 @@ from typing import TYPE_CHECKING, Any
 import requests
 from requests import sessions
 
-from outtaoutlook.shared import (
+from outtaoutlook.graphapi import (
     GRAPH_API_URL,
     GRAPH_MESSAGE_FIELDS_SET,
-    TITLE_UNTITLED,
-    ExportAbortedError,
-    ExportError,
     GraphApiConfig,
     GraphApiReturnT,
     GraphAttachmentT,
     GraphMessageT,
+    graph_get_resource,
+    log_message_notice,
+)
+from outtaoutlook.shared import (
+    TITLE_UNTITLED,
+    ExportAbortedError,
+    ExportError,
     abort_workers_event,
     datetime_now,
     get_hash_filename,
-    graph_get_resource,
-    log_message_notice,
     logger,
     safe_file_name,
     unique_file_path,

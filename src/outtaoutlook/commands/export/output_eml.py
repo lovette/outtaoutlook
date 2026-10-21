@@ -7,15 +7,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Self
 
-from outtaoutlook.shared import (
+from outtaoutlook.graphapi import (
     GRAPH_API_URL,
-    ExportAbortedError,
     GraphApiConfig,
     GraphMessageT,
-    abort_workers_event,
     graph_get_resource,
     graph_get_resource_batch,
     log_message_notice,
+)
+from outtaoutlook.shared import (
+    ExportAbortedError,
+    abort_workers_event,
     logger,
     unique_file_path,
 )

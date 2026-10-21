@@ -4,9 +4,8 @@ import logging
 from pathlib import Path
 from typing import Self
 
+from outtaoutlook.graphapi import GraphMessageT, log_message_notice
 from outtaoutlook.shared import (
-    GraphMessageT,
-    log_message_notice,
     unique_file_path,
 )
 

@@ -6,17 +6,19 @@ from typing import TYPE_CHECKING, Annotated
 import requests
 import typer
 
-from outtaoutlook.shared import (
+from outtaoutlook.graphapi import (
     AUTH_ERROR_USECOMMAND,
     AUTH_NO_CACHE_ERROR,
     GRAPH_SCOPES,
-    CommandContext,
     GraphApiError,
     GraphAuthRequiredError,
-    console,
-    err_console,
     get_graph_client,
     get_token_cache_info,
+)
+from outtaoutlook.shared import (
+    CommandContext,
+    console,
+    err_console,
     logger,
 )
 

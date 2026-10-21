@@ -3,10 +3,9 @@
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Self
+from typing import TYPE_CHECKING, Self
 
 from outtaoutlook.shared import (
-    GraphMessageT,
     unique_file_path,
 )
 
@@ -18,6 +17,9 @@ from .shared import (
     exportstat_incr,
     write_output_file,
 )
+
+if TYPE_CHECKING:
+    from outtaoutlook.graphapi import GraphMessageT
 
 ######################################################################
 # Helpers

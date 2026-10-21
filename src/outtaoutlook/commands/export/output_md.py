@@ -14,12 +14,10 @@ import yaml
 from html_to_markdown import ConversionOptions
 from html_to_markdown import convert as convert_to_markdown
 
+from outtaoutlook.graphapi import GraphFolderT, GraphMessageT, log_message_notice
 from outtaoutlook.shared import (
     FileMetaPropT,
-    GraphFolderT,
-    GraphMessageT,
     datetime_now,
-    log_message_notice,
     unique_file_path,
 )
 

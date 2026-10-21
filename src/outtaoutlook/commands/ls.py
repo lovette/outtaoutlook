@@ -7,16 +7,18 @@ import requests
 import typer
 from requests import sessions
 
-from outtaoutlook.shared import (
+from outtaoutlook.graphapi import (
     AUTH_ERROR_USECOMMAND,
-    CommandContext,
-    ExportError,
     GraphAuthRequiredError,
-    console,
-    err_console,
     get_graph_config,
     graph_resolve_folder_paths,
     print_graph_request_exception,
+)
+from outtaoutlook.shared import (
+    CommandContext,
+    ExportError,
+    console,
+    err_console,
 )
 
 app = typer.Typer(add_completion=False)
