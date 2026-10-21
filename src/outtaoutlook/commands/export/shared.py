@@ -119,6 +119,9 @@ thread_local_data = threading.local()
 # Keep track of whether the first thread spawned has received its first batch of messages.
 first_batch_complete_event = threading.Event()
 
+# Any worker can signal for all other workers to abort.
+abort_workers_event = threading.Event()
+
 
 ######################################################################
 # Public functions

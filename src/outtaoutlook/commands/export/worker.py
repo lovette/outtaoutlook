@@ -23,7 +23,6 @@ from outtaoutlook.graphapi import (
 from outtaoutlook.shared import (
     ExportAbortedError,
     ExportError,
-    abort_workers_event,
     console,
     logger,
 )
@@ -42,6 +41,7 @@ from .shared import (
     ExportStatsT,
     OutputFormatChoice,
     _release_workers,
+    abort_workers_event,
     first_batch_complete_event,
     thread_local_data,
 )

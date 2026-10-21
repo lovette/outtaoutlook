@@ -17,7 +17,6 @@ from outtaoutlook.graphapi import (
 )
 from outtaoutlook.shared import (
     ExportAbortedError,
-    abort_workers_event,
     logger,
     unique_file_path,
 )
@@ -27,6 +26,7 @@ from .shared import (
     ExportOptions,
     ExportStat,
     ExportStatsT,
+    abort_workers_event,
     exportstat_incr,
     write_output_file,
 )

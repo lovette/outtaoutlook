@@ -25,10 +25,8 @@ from outtaoutlook.graphapi import (
     log_message_notice,
 )
 from outtaoutlook.shared import (
-    TITLE_UNTITLED,
     ExportAbortedError,
     ExportError,
-    abort_workers_event,
     datetime_now,
     get_hash_filename,
     logger,
@@ -46,6 +44,7 @@ from .shared import (
     ExportStat,
     ExportStatsT,
     _release_workers,
+    abort_workers_event,
     exportstat_incr,
 )
 
@@ -58,6 +57,7 @@ if TYPE_CHECKING:
 ######################################################################
 # Constants
 
+TITLE_UNTITLED = "Untitled"
 MIN_PROGRESS_THRESHOLD = 10  # Hide progress if only a few messages
 
 ATTACHMENT_DEFAULT_SUFFIX = ".bin"

@@ -18,9 +18,9 @@ from rich.console import Console
 ######################################################################
 # Constants
 
+
 APP_NAME = "outtaoutlook"
 VERBOSE_LOGGING_LEVEL_ERROR = 0  # logging.ERROR
-TITLE_UNTITLED = "Untitled"
 TITLE_MAXLEN = 255 - 25  # macOS limit minus a few characters for whatever `unique_file_path` tacks on
 
 # These are banned outright: \/:
@@ -33,10 +33,7 @@ RE_TITLE_WHITESPACE = re.compile(r"\s+")
 
 
 ######################################################################
-# Types and classes
-
-
-FileMetaPropT = dict[str, str | int | Sequence[str | int]]
+# Exceptions
 
 
 class ExportError(Exception):
@@ -49,6 +46,13 @@ class ExportAbortedError(ExportError):
     def __init__(self, message: str = "Export operation aborted due to abort signal.") -> None:
         """Constructor."""
         super().__init__(message)
+
+
+######################################################################
+# Types and classes
+
+
+FileMetaPropT = dict[str, str | int | Sequence[str | int]]
 
 
 @dataclass
@@ -79,6 +83,7 @@ class CommandContext:
 ######################################################################
 # Globals
 
+
 console = Console(soft_wrap=True)  # Enable soft wrap so newlines are not inserted to wrap lines wider than the terminal
 err_console = Console(stderr=True, soft_wrap=True, style="red", highlight=False)
 logger = logging.getLogger(APP_NAME)  # initialized in __main__
@@ -88,10 +93,7 @@ logger = logging.getLogger(APP_NAME)  # initialized in __main__
 # Therefore we need a way to reserve unique paths that is coordinated between all threads.
 # We do this by keeping a set of unique paths and a lock to coordinate access.
 # dict[path.parent]=(set(path.name), lock)
-unique_file_path_sets: dict[Path, tuple[set[str], threading.Lock]] = defaultdict(lambda: (set(), threading.Lock()))
-
-# Any worker can signal for all other workers to abort.
-abort_workers_event = threading.Event()
+_unique_file_path_sets: dict[Path, tuple[set[str], threading.Lock]] = defaultdict(lambda: (set(), threading.Lock()))
 
 
 ######################################################################
@@ -195,7 +197,7 @@ def unique_file_path(p: Path, date_hint: datetime | None = None) -> Path:
     # Keep in mind we need to keep the final filename within TITLE_MAXLEN characters.
 
     max_paths = 10000
-    path_names_set, path_names_lock = unique_file_path_sets[p.parent]
+    path_names_set, path_names_lock = _unique_file_path_sets[p.parent]
 
     with path_names_lock:
         unique_path = _get_unique_path(p)
