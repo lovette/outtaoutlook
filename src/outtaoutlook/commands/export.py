@@ -42,19 +42,21 @@ from outtaoutlook.shared import (
     MAILBOX_ROOT,
     TITLE_UNTITLED,
     CommandContext,
+    ExportAbortedError,
+    ExportError,
     ExportFolderContext,
     ExportOptions,
     ExportStat,
     ExportStatsT,
     FileMetaPropT,
     GraphApiConfig,
-    GraphApiError,
     GraphApiReturnT,
     GraphAttachmentT,
     GraphAuthRequiredError,
     GraphFolderT,
     GraphMessageT,
     OutputFormatChoice,
+    abort_workers_event,
     console,
     datetime_now,
     err_console,
@@ -91,9 +93,6 @@ thread_id_counter = 0
 
 # Keep track of whether the first thread spawned has received its first batch of messages.
 first_batch_complete_event = threading.Event()
-
-# Any worker can signal for all other workers to abort.
-abort_workers_event = threading.Event()
 
 
 ######################################################################
@@ -833,6 +832,9 @@ def _export_folder_batch(  # noqa: PLR0913, PLR0917
     progress.update(progress_task_id, status="writing files", refresh=True)
 
     for message in messages:
+        if abort_workers_event.is_set():
+            raise ExportAbortedError
+
         n_exported = 1  # count processed even if in manifest
 
         if message["id"] not in exported_ids:
@@ -1096,6 +1098,9 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0915
 
     if True:
         while next_url is not None and exported_total_count < export_limit:
+            if abort_workers_event.is_set():
+                raise ExportAbortedError
+
             try:
                 batch_total, next_url = _export_folder_batch(
                     session,
@@ -1112,7 +1117,7 @@ def _export_folder(  # noqa: C901, PLR0912, PLR0915
                     export_stats,
                 )
 
-            except requests.RequestException, GraphApiError, ValueError, OSError:
+            except requests.RequestException, ExportError, ValueError, OSError:
                 # Try to keep the manifest up-to-date even if an error occurs.
                 _write_manifest()
                 raise
@@ -1187,7 +1192,7 @@ def _build_filter_query(
     return filter_query, search_query
 
 
-def _abort_workers() -> None:
+def _signal_abort_workers() -> None:
     """Set event that signals all workers to stop exporting messages."""
     if not abort_workers_event.is_set():
         logger.debug("Setting all workers abort flag")
@@ -1247,7 +1252,7 @@ def _export_folder_worker(  # noqa: C901
 
             if not first_batch_complete_event.wait(timeout=FIRST_BATCH_COMPLETE_EVENT_WAIT):
                 _emit_log("Timed out waiting for release.", logging.DEBUG)
-                _abort_workers()
+                _signal_abort_workers()
                 return False
 
         return True
@@ -1274,6 +1279,8 @@ def _export_folder_worker(  # noqa: C901
         ExportStat.STAT_FILE_CREATED: 0,
     }
 
+    export_result = ExportResult(stats=export_stats)
+
     try:
         with sessions.Session() as session:
             export_context = ExportFolderContext(
@@ -1291,21 +1298,28 @@ def _export_folder_worker(  # noqa: C901
     except requests.RequestException as err:
         print_graph_request_exception(progress.console, err)
         _emit_log("Encountered an exception.", logging.DEBUG)
-        _abort_workers()
+        export_result.aborted = True
     except GraphAuthRequiredError as err:
         # This should have triggered in main thread when calling `get_graph_config`...
         logger.error("%s %s", str(err), AUTH_ERROR_USECOMMAND)  # noqa: TRY400
         _emit_log("Encountered an exception.", logging.DEBUG)
-        _abort_workers()
-    except (GraphApiError, ValueError, OSError) as err:
+        export_result.aborted = True
+    except ExportAbortedError:
+        # Whichever thread signaled the abort already logged the reason...
+        export_result.aborted = True
+    except (ExportError, ValueError, OSError) as err:
         logger.error("%s", str(err))  # noqa: TRY400
         _emit_log("Encountered an exception.", logging.DEBUG)
-        _abort_workers()
+        export_result.aborted = True
     finally:
         # Primary thread must always release workers!
         _release_workers()
 
-    return ExportResult(aborted=True, stats=export_stats)
+    # The failure of one worker brings everything to a halt.
+    if export_result.aborted:
+        _signal_abort_workers()
+
+    return export_result
 
 
 def _export_folders(  # noqa: C901, PLR0912, PLR0915
@@ -1473,7 +1487,7 @@ def _export_folders(  # noqa: C901, PLR0912, PLR0915
 
             if worker_exception and not abort_workers_event.is_set():
                 logger.debug('Folder("%s"): Worker resulted in an exception.', folder["folderPath"])
-                _abort_workers()
+                _signal_abort_workers()
 
             if abort_workers_event.is_set() and not shutdown_pending:
                 # Cancel any workers that have not run yet
@@ -1856,7 +1870,10 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
     except GraphAuthRequiredError as err:
         err_console.print(f"{err} {AUTH_ERROR_USECOMMAND}")
         raise typer.Exit(code=1) from err
-    except (GraphApiError, ValueError, OSError) as err:
+    except ExportAbortedError as err:
+        # Whichever thread signaled the abort already logged the reason...
+        raise typer.Exit(code=1) from err
+    except (ExportError, ValueError, OSError) as err:
         err_console.print(f"Error: {err}")
         raise typer.Exit(code=1) from err
 

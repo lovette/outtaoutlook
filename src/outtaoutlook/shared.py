@@ -193,7 +193,19 @@ GraphAttachmentT = dict[str, Any]  # GRAPH_ATTACHMENT_FIELDS_SET
 FileMetaPropT = dict[str, str | int | Sequence[str | int]]
 
 
-class GraphApiError(Exception):
+class ExportError(Exception):
+    """Base class for all export related errors."""
+
+
+class ExportAbortedError(ExportError):
+    """Raised when an export operation is aborted."""
+
+    def __init__(self, message: str = "Export operation aborted due to abort signal.") -> None:
+        """Constructor."""
+        super().__init__(message)
+
+
+class GraphApiError(ExportError):
     """Base class for Graph API related errors."""
 
 
@@ -262,10 +274,6 @@ class OutputFormatChoice(StrEnum):
     html = "html"
     json = "json"
     md = "md"
-
-
-class ExportError(GraphApiError):
-    """Export failure."""
 
 
 class ExportStat(StrEnum):
@@ -345,6 +353,9 @@ graph_get_resource_lock = threading.Semaphore(GRAPH_API_CONCURRENT_LIMIT)
 # We do this by keeping a set of unique paths and a lock to coordinate access.
 # dict[path.parent]=(set(path.name), lock)
 unique_file_path_sets: dict[Path, tuple[set[str], threading.Lock]] = defaultdict(lambda: (set(), threading.Lock()))
+
+# Any worker can signal for all other workers to abort.
+abort_workers_event = threading.Event()
 
 
 ######################################################################

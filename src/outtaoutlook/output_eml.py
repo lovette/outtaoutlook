@@ -9,12 +9,14 @@ from typing import TYPE_CHECKING, Self
 
 from outtaoutlook.shared import (
     GRAPH_API_URL,
+    ExportAbortedError,
     ExportFolderContext,
     ExportOptions,
     ExportStat,
     ExportStatsT,
     GraphApiConfig,
     GraphMessageT,
+    abort_workers_event,
     exportstat_incr,
     graph_get_resource,
     graph_get_resource_batch,
@@ -249,6 +251,9 @@ class ExportFormatEml:
         n_messages = len(responses)
 
         for request_id, response in responses.items():
+            if abort_workers_event.is_set():
+                raise ExportAbortedError
+
             item = self._queued_messages.pop(request_id)  # dequeue
 
             content, content_type = response.get("body"), response.get("headers", {}).get("Content-Type")

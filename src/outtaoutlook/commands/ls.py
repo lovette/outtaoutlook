@@ -10,7 +10,7 @@ from requests import sessions
 from outtaoutlook.shared import (
     AUTH_ERROR_USECOMMAND,
     CommandContext,
-    GraphApiError,
+    ExportError,
     GraphAuthRequiredError,
     console,
     err_console,
@@ -71,7 +71,7 @@ def ls(
     except GraphAuthRequiredError as err:
         err_console.print(f"{err} {AUTH_ERROR_USECOMMAND}")
         raise typer.Exit(code=1) from err
-    except (GraphApiError, ValueError, OSError) as err:
+    except (ExportError, ValueError, OSError) as err:
         err_console.print(f"Error: {err}")
         raise typer.Exit(code=1) from err
 
