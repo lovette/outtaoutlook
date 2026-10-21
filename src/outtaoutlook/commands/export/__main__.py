@@ -1,6 +1,5 @@
 """outtaoutlook export command."""
 
-import logging
 import re
 from decimal import Decimal
 from enum import StrEnum
@@ -14,7 +13,6 @@ import yaml
 from requests import sessions
 
 from outtaoutlook.shared import (
-    APP_NAME,
     AUTH_ERROR_USECOMMAND,
     GRAPH_API_BATCH_MAX,
     GRAPH_API_BATCH_MIN,
@@ -28,6 +26,7 @@ from outtaoutlook.shared import (
     err_console,
     get_graph_config,
     graph_resolve_folder_paths,
+    logger,
     path_with_vars,
     print_graph_request_exception,
     safe_file_name,
@@ -47,7 +46,6 @@ from .worker import export_folders
 # Global variables
 
 app = typer.Typer(add_completion=False)
-logger = logging.getLogger(APP_NAME)  # initialized in __main__
 
 
 ######################################################################

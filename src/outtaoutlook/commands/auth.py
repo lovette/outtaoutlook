@@ -1,6 +1,5 @@
 """outtaoutlook auth command."""
 
-import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
 
@@ -8,7 +7,6 @@ import requests
 import typer
 
 from outtaoutlook.shared import (
-    APP_NAME,
     AUTH_ERROR_USECOMMAND,
     AUTH_NO_CACHE_ERROR,
     GRAPH_SCOPES,
@@ -19,13 +17,13 @@ from outtaoutlook.shared import (
     err_console,
     get_graph_client,
     get_token_cache_info,
+    logger,
 )
 
 if TYPE_CHECKING:
     from pathlib import Path
 
 app = typer.Typer(add_completion=False)
-logger = logging.getLogger(APP_NAME)  # initialized in __main__
 
 
 ######################################################################
