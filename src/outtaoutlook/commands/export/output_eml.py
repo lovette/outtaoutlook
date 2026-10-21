@@ -10,19 +10,22 @@ from typing import TYPE_CHECKING, Self
 from outtaoutlook.shared import (
     GRAPH_API_URL,
     ExportAbortedError,
-    ExportFolderContext,
-    ExportOptions,
-    ExportStat,
-    ExportStatsT,
     GraphApiConfig,
     GraphMessageT,
     abort_workers_event,
-    exportstat_incr,
     graph_get_resource,
     graph_get_resource_batch,
     log_message_notice,
     logger,
     unique_file_path,
+)
+
+from .shared import (
+    ExportFolderContext,
+    ExportOptions,
+    ExportStat,
+    ExportStatsT,
+    exportstat_incr,
     write_output_file,
 )
 

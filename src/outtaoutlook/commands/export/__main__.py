@@ -22,10 +22,8 @@ from outtaoutlook.shared import (
     CommandContext,
     ExportAbortedError,
     ExportError,
-    ExportOptions,
     FileMetaPropT,
     GraphAuthRequiredError,
-    OutputFormatChoice,
     console,
     err_console,
     get_graph_config,
@@ -35,7 +33,14 @@ from outtaoutlook.shared import (
     safe_file_name,
 )
 
-from .shared import ATTACHMENTS_DEFAULT_FOLDER, ATTACHMENTS_FOLDER_FILE, ATTACHMENTS_FOLDER_ROOT, MAX_EXPORT_WORKERS
+from .shared import (
+    ATTACHMENTS_DEFAULT_FOLDER,
+    ATTACHMENTS_FOLDER_FILE,
+    ATTACHMENTS_FOLDER_ROOT,
+    MAX_EXPORT_WORKERS,
+    ExportOptions,
+    OutputFormatChoice,
+)
 from .worker import export_folders
 
 ######################################################################

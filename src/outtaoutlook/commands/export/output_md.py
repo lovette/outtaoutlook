@@ -15,17 +15,20 @@ from html_to_markdown import ConversionOptions
 from html_to_markdown import convert as convert_to_markdown
 
 from outtaoutlook.shared import (
-    ExportFolderContext,
-    ExportOptions,
-    ExportStat,
-    ExportStatsT,
     FileMetaPropT,
     GraphFolderT,
     GraphMessageT,
     datetime_now,
-    exportstat_incr,
     log_message_notice,
     unique_file_path,
+)
+
+from .shared import (
+    ExportFolderContext,
+    ExportOptions,
+    ExportStat,
+    ExportStatsT,
+    exportstat_incr,
     write_output_file,
 )
 

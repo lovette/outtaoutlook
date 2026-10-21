@@ -6,13 +6,16 @@ from pathlib import Path
 from typing import Self
 
 from outtaoutlook.shared import (
+    GraphMessageT,
+    unique_file_path,
+)
+
+from .shared import (
     ExportFolderContext,
     ExportOptions,
     ExportStat,
     ExportStatsT,
-    GraphMessageT,
     exportstat_incr,
-    unique_file_path,
     write_output_file,
 )
 

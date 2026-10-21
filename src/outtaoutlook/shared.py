@@ -13,18 +13,14 @@ from collections import defaultdict
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from enum import StrEnum
 from operator import itemgetter
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import msal
 import requests
 from requests import Response, sessions
 from rich.console import Console
-
-if TYPE_CHECKING:
-    from rich.progress import Progress, TaskID
 
 ######################################################################
 # Constants
@@ -265,72 +261,6 @@ class CommandContext:
 
     def __post_init__(self) -> None:  # noqa: D105
         self.common_opts = CommonCommandOptions()
-
-
-class OutputFormatChoice(StrEnum):
-    """Choices for output file format."""
-
-    eml = "eml"
-    html = "html"
-    json = "json"
-    md = "md"
-
-
-class ExportStat(StrEnum):
-    """Export statistic messages."""
-
-    STAT_FILE_CREATED = "Files created"
-    STAT_ATTACHMENT_SAVED = "Attachments saved"
-    STAT_SKIPPED_DUPLICATE = "Skipped; Message already exported"
-    STAT_SKIPPED_MARKDOWN_CONVERSION_FAILED = "Skipped; Markdown conversion failed"
-    STAT_SKIPPED_NO_MESSAGE_BODY = "Skipped; No message body"
-    STAT_SKIPPED_NO_MESSAGE_CONTENT_JUST_ATTACHMENTS = "Skipped; No file content, just attachments (not being saved)"
-    STAT_SKIPPED_NO_MESSAGE_CONTENT_NO_ATTACHMENTS = "Skipped; No file content"
-    STAT_SKIPPED_NO_MESSAGE_CONTENT_UNKNOWN = "Skipped; No file content, unknown reason"
-    STAT_SKIPPED_EVENT_MESSAGE = "Skipped; Calendar event"
-
-
-@dataclass
-class ExportOptions:
-    """Export command options."""
-
-    out_format: OutputFormatChoice  # Output file format.
-    attachments_folder: str | Path  # `ATTACHMENTS_FOLDER_*`, folder name or absolute path.
-    attachments_mkdir: bool  # Create mail folder hierarchy in attachments directory.
-    batch_size: int  # Number of messages to process in a batch.
-    dry_run: bool  # Whether to perform a dry run without making any changes.
-    filter_query: str | None  # --filter criteria from command line and config file.
-    filter_test: bool  # Whether to perform a filter test without exporting.
-    manifest_dir: Path | None  # Directory to write the manifest file.
-    mkdir_maxdepth: int | None  # Maximum depth (from the leaf) of folder tree to create when creating mail folder hierarchy.
-    md_body_tags: list[str] | None  # --body-tag tags from command line and config file.
-    md_metaprop: FileMetaPropT | None  # --metaprop properties from command line and config file.
-    md_tags: list[str] | None  # --tag tags from command line and config file.
-    files_dir: Path  # Directory to save files (set internally.)
-    files_limit: int  # Maximum number of files to export (per folder).
-    files_mkdir: bool  # Create mail folder hierarchy in files directory.
-    md_place_tags_body_end: bool  # True to place body tags at the end of the file instead the top.
-    md_place_tags_frontmatter: bool  # True to place non-body tags in frontmatter.
-    search_query: str | None  # --search criteria from command line and config file.
-    root_out_dir: Path  # Root output directory (set by user.)
-    with_attachments: bool  # Whether to download and link attachments to files.
-    max_workers: int  # Maximum number of workers being used for exporting.
-
-
-@dataclass
-class ExportFolderContext:
-    """Context for exporting a folder."""
-
-    folder: GraphFolderT
-    session: sessions.Session
-    graph_config: GraphApiConfig
-    progress: Progress
-    progress_task_id: TaskID
-    export_opts: ExportOptions
-    export_stats: ExportStatsT
-
-
-ExportStatsT = dict[ExportStat, int]
 
 
 ######################################################################
@@ -1041,17 +971,6 @@ def unique_file_path(p: Path, date_hint: datetime | None = None) -> Path:
     raise ExportError(errmsg)
 
 
-def exportstat_incr(export_stats: ExportStatsT, stat: ExportStat, incr: int = 1) -> None:
-    """Increment specified export stat.
-
-    Args:
-        export_stats (ExportStatsT): Export stats dictionary.
-        stat (ExportStat): Stat to increment.
-        incr (int, optional): Increment amount. Defaults to 1.
-    """
-    export_stats[stat] = export_stats.get(stat, 0) + incr
-
-
 def log_message_notice(message: GraphMessageT, errmsg: str, level: int = logging.WARNING) -> None:
     """Log a warning related to a message.
 
@@ -1061,31 +980,6 @@ def log_message_notice(message: GraphMessageT, errmsg: str, level: int = logging
         level (int): Logging level code (e.g., logging.WARNING).
     """
     logger.log(level, 'message("%s"): %s', message["subject"], errmsg)
-
-
-def write_output_file(
-    file_path: Path,
-    file_text: str,
-    file_date: datetime | None,
-    export_opts: ExportOptions,
-) -> None:
-    """Write output file and set its modification date.
-
-    Args:
-        file_path (Path): Output file path.
-        file_text (str): File content.
-        file_date (datetime | None): Modification date. If None, the file's modification date will not be set.
-        export_opts (ExportOptions): Export options.
-    """
-    if not export_opts.dry_run:
-        file_path.write_text(file_text, encoding="utf-8")
-
-        if file_date:
-            os.utime(file_path, (file_date.timestamp(), file_date.timestamp()))
-
-        logger.debug("Wrote file to '%s'", file_path.name)
-    else:
-        logger.debug("Wrote file to '%s' (dry run)", file_path.name)
 
 
 def _get_cache_file_path_and_header(
