@@ -100,6 +100,7 @@ class ExportResult:
 class ExportFolderContext:
     """Context for exporting a folder."""
 
+    thread_id: int
     folder: GraphFolderT
     session: sessions.Session
     graph_config: GraphApiConfig
@@ -113,11 +114,8 @@ class ExportFolderContext:
 # Global variables
 
 
-# Thread-local storage for per-thread data.
-thread_local_data = threading.local()
-
 # Keep track of whether the first thread spawned has received its first batch of messages.
-first_batch_complete_event = threading.Event()
+list_messages_success_event = threading.Event()
 
 # Any worker can signal for all other workers to abort.
 abort_workers_event = threading.Event()
@@ -163,7 +161,12 @@ def write_output_file(
         logger.debug("Wrote file to '%s' (dry run)", file_path.name)
 
 
-def _release_workers() -> None:
-    if thread_local_data.thread_id == 1 and not first_batch_complete_event.is_set():
+def signal_list_messages_success(thread_id: int) -> None:
+    """Signal to other workers that they can proceed with their work.
+
+    Args:
+        thread_id (int): Current thread ID.
+    """
+    if thread_id == 1 and not list_messages_success_event.is_set():
         logger.debug("Releasing workers")
-        first_batch_complete_event.set()
+        list_messages_success_event.set()

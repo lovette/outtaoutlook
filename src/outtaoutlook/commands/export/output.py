@@ -43,9 +43,9 @@ from .shared import (
     ExportResult,
     ExportStat,
     ExportStatsT,
-    _release_workers,
     abort_workers_event,
     exportstat_incr,
+    signal_list_messages_success,
 )
 
 if TYPE_CHECKING:
@@ -790,7 +790,7 @@ def export_folder(  # noqa: C901, PLR0912, PLR0915
 
     # Now that we know that the first batch of messages has been
     # successfully retrieved, we can release the other workers.
-    _release_workers()
+    signal_list_messages_success(export_context.thread_id)
 
     first_batch_messages = first_batch_data.get("value", [])
 

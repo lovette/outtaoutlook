@@ -40,10 +40,9 @@ from .shared import (
     ExportStat,
     ExportStatsT,
     OutputFormatChoice,
-    _release_workers,
     abort_workers_event,
-    first_batch_complete_event,
-    thread_local_data,
+    list_messages_success_event,
+    signal_list_messages_success,
 )
 
 if TYPE_CHECKING:
@@ -56,6 +55,9 @@ if TYPE_CHECKING:
 # Global variables
 
 
+# Thread-local storage for per-thread data.
+thread_local_data = threading.local()
+
 # Each thread is assigned a unique counter ID to track its order of execution.
 thread_id_counter_lock = threading.Lock()
 thread_id_counter = 0
@@ -65,7 +67,7 @@ thread_id_counter = 0
 # Constants
 
 
-FIRST_BATCH_COMPLETE_EVENT_WAIT = 60  # seconds; just a failsafe, I don't expect there to be any deadlocking :)
+LIST_MESSAGES_SUCCESS_EVENT_WAIT = 60  # seconds; just a failsafe, I don't expect there to be any deadlocking :)
 FOLDER_ICON = "\N{OPEN FILE FOLDER}\N{NARROW NO-BREAK SPACE}"
 
 EXPORT_MODULES: dict[OutputFormatChoice, type[OutputFormatModule]] = {
@@ -132,7 +134,80 @@ def _signal_abort_workers() -> None:
         abort_workers_event.set()
 
 
-def _export_folder_worker(  # noqa: C901
+def _emit_log(folder: GraphFolderT, errmsg: str, level: int = logging.INFO) -> None:
+    logger.log(level, 'Folder("%s"): %s', folder["folderPath"], errmsg)
+
+
+def _assign_thread_id() -> int:
+    global thread_id_counter  # noqa: PLW0603
+
+    if not getattr(thread_local_data, "thread_id", None):
+        with thread_id_counter_lock:
+            thread_id_counter += 1
+            thread_local_data.thread_id = thread_id_counter
+
+        new_name = f"Thread #{thread_local_data.thread_id}"
+        logger.debug("Setting thread name to '%s'", new_name)
+        threading.current_thread().name = new_name
+
+    return thread_local_data.thread_id
+
+
+def _wait_first_batch_release(folder: GraphFolderT) -> bool:
+    thread_id = _assign_thread_id()
+
+    if thread_id > 1 and not list_messages_success_event.is_set():
+        _emit_log(folder, "Waiting for first batch release", logging.DEBUG)
+
+        if not list_messages_success_event.wait(timeout=LIST_MESSAGES_SUCCESS_EVENT_WAIT):
+            _emit_log(folder, "Timed out waiting for release.", logging.DEBUG)
+            _signal_abort_workers()
+            return False
+
+    return True
+
+
+def _print_export_results(results: dict[str, tuple[GraphFolderT, ExportResult | None]]) -> None:  # noqa: C901
+    # Filter export_results to items with messages or stats
+    results = {
+        folder_id: (folder, export_result)
+        for folder_id, (folder, export_result) in results.items()
+        if export_result and (export_result.messages or export_result.stats)
+    }
+
+    if not results:
+        return
+
+    console.print()
+    console.print("[bold]Results:")
+
+    for folder, export_result in results.values():
+        if export_result and (export_result.messages or export_result.stats):
+            console.print()
+            console.print(f"[bold]'{folder['folderPath']}'[/bold]:")
+
+            if export_result.aborted:
+                console.print("[red]- Export did not complete[/red]")
+
+            for level, messages in export_result.messages.items():
+                for message in messages:
+                    if level == logging.ERROR:
+                        console.print(f"[red]- {message}[/red]")
+                    elif level == logging.WARNING:
+                        console.print(f"[yellow]- {message}[/yellow]")
+                    else:
+                        console.print(f"- {message}")
+
+            if export_result.stats:
+                for stat, stat_count in export_result.stats.items():
+                    console.print(f"- {stat}: {stat_count:,}")
+
+
+######################################################################
+# Worker main
+
+
+def _worker_main(
     folder: GraphFolderT,
     *,
     progress: Progress,
@@ -155,49 +230,19 @@ def _export_folder_worker(  # noqa: C901
     Returns:
         ExportResult: The result of the export operation, including statistics and any status message.
     """
+    # Do this first!
+    _assign_thread_id()
 
-    def _emit_log(errmsg: str, level: int = logging.INFO) -> None:
-        logger.log(level, 'Folder("%s"): %s', folder["folderPath"], errmsg)
-
-    def _get_thread_id() -> int:
-        global thread_id_counter  # noqa: PLW0603
-
-        if not getattr(thread_local_data, "thread_id", None):
-            with thread_id_counter_lock:
-                thread_id_counter += 1
-                thread_local_data.thread_id = thread_id_counter
-
-            new_name = f"Thread #{thread_local_data.thread_id}"
-            logger.debug("Setting thread name to '%s'", new_name)
-            threading.current_thread().name = new_name
-
-        return thread_local_data.thread_id
-
-    def _wait_first_batch_release() -> bool:
-        if thread_id > 1 and not first_batch_complete_event.is_set():
-            _emit_log("Waiting for first batch release", logging.DEBUG)
-
-            if not first_batch_complete_event.wait(timeout=FIRST_BATCH_COMPLETE_EVENT_WAIT):
-                _emit_log("Timed out waiting for release.", logging.DEBUG)
-                _signal_abort_workers()
-                return False
-
-        return True
-
-    thread_id = _get_thread_id()
-
-    # Wait for the first batch to pass its checkpoint if this is not the primary thread.
-    if not _wait_first_batch_release():
+    # Wait for the first/primary thread/worker to get its first batch of messages.
+    # This allows the primary worker to encounter any issues with
+    # the Graph API before other workers proceed and encounter the same.
+    if not _wait_first_batch_release(folder):
         return ExportResult(aborted=True)
 
-    # If one worker aborted, all the others abort too.
+    # If the first batch of the first worker failed, or if any worker has since
+    # signaled an abort, all workers should stop too.
     if abort_workers_event.is_set():
         return ExportResult(aborted=True)
-
-    _emit_log("Working on this folder", logging.DEBUG)
-
-    # Reset task start time to get true elapsed time for this folder.
-    progress.reset(progress_task_id, start=True)
 
     output_module_type = EXPORT_MODULES[export_opts.out_format]
 
@@ -208,9 +253,15 @@ def _export_folder_worker(  # noqa: C901
 
     export_result = ExportResult(stats=export_stats)
 
+    _emit_log(folder, "Working on this folder...", logging.DEBUG)
+
+    # Reset task start time to get true elapsed time for this folder.
+    progress.reset(progress_task_id, start=True)
+
     try:
         with sessions.Session() as session:
             export_context = ExportFolderContext(
+                thread_id=thread_local_data.thread_id,
                 folder=folder,
                 session=session,
                 graph_config=graph_config,
@@ -224,23 +275,23 @@ def _export_folder_worker(  # noqa: C901
 
     except requests.RequestException as err:
         print_graph_request_exception(progress.console, err)
-        _emit_log("Encountered an exception.", logging.DEBUG)
+        _emit_log(folder, "Encountered an exception.", logging.DEBUG)
         export_result.aborted = True
     except GraphAuthRequiredError as err:
         # This should have triggered in main thread when calling `get_graph_config`...
         logger.error("%s %s", str(err), AUTH_ERROR_USECOMMAND)
-        _emit_log("Encountered an exception.", logging.DEBUG)
+        _emit_log(folder, "Encountered an exception.", logging.DEBUG)
         export_result.aborted = True
     except ExportAbortedError:
         # Whichever thread signaled the abort already logged the reason...
         export_result.aborted = True
     except (ExportError, ValueError, OSError) as err:
         logger.error("%s", str(err))
-        _emit_log("Encountered an exception.", logging.DEBUG)
+        _emit_log(folder, "Encountered an exception.", logging.DEBUG)
         export_result.aborted = True
     finally:
-        # Primary thread must always release workers!
-        _release_workers()
+        # Primary thread must always release the other workers!
+        signal_list_messages_success(thread_local_data.thread_id)
 
     # The failure of one worker brings everything to a halt.
     if export_result.aborted:
@@ -253,7 +304,7 @@ def _export_folder_worker(  # noqa: C901
 # Public functions
 
 
-def export_folders(  # noqa: C901, PLR0912, PLR0915
+def start_workers(  # noqa: C901, PLR0912, PLR0915
     folders: list[GraphFolderT],
     graph_config: GraphApiConfig,
     export_opts: ExportOptions,
@@ -267,41 +318,6 @@ def export_folders(  # noqa: C901, PLR0912, PLR0915
         export_opts (ExportOptions): Options for exporting messages.
         max_threads (int or None): Maximum size of thread pool or None to decide based on hardware.
     """
-
-    def _print_export_results(results: dict[str, tuple[GraphFolderT, ExportResult | None]]) -> None:  # noqa: C901
-        # Filter export_results to items with messages or stats
-        results = {
-            folder_id: (folder, export_result)
-            for folder_id, (folder, export_result) in results.items()
-            if export_result and (export_result.messages or export_result.stats)
-        }
-
-        if not results:
-            return
-
-        console.print()
-        console.print("[bold]Results:")
-
-        for folder, export_result in results.values():
-            if export_result and (export_result.messages or export_result.stats):
-                console.print()
-                console.print(f"[bold]'{folder['folderPath']}'[/bold]:")
-
-                if export_result.aborted:
-                    console.print("[red]- Export did not complete[/red]")
-
-                for level, messages in export_result.messages.items():
-                    for message in messages:
-                        if level == logging.ERROR:
-                            console.print(f"[red]- {message}[/red]")
-                        elif level == logging.WARNING:
-                            console.print(f"[yellow]- {message}[/yellow]")
-                        else:
-                            console.print(f"- {message}")
-
-                if export_result.stats:
-                    for stat, stat_count in export_result.stats.items():
-                        console.print(f"- {stat}: {stat_count:,}")
 
     # Keyword arguments to `_export_folder_worker`.
     class _WorkerArgs(TypedDict):
@@ -361,7 +377,7 @@ def export_folders(  # noqa: C901, PLR0912, PLR0915
                 "export_opts": export_opts,
             }
 
-            future = executor.submit(_export_folder_worker, folder, **worker_args)
+            future = executor.submit(_worker_main, folder, **worker_args)
 
             workers[future] = folder
             future_task_id[future] = progress_task_id

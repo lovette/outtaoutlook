@@ -42,7 +42,7 @@ from .shared import (
     ExportOptions,
     OutputFormatChoice,
 )
-from .worker import export_folders
+from .worker import start_workers
 
 ######################################################################
 # Global variables
@@ -701,4 +701,4 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
 
     console.print()
 
-    export_folders(folders, graph_config, export_opts, max_threads)
+    start_workers(folders, graph_config, export_opts, max_threads)
