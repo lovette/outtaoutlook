@@ -611,6 +611,9 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
     if not (folder or allfolders):
         errmsg = "At least one '--folder' or the '--mailbox' option must be specified."
         raise typer.BadParameter(errmsg)
+    if folder and allfolders:
+        errmsg = "The '--folder' and '--mailbox' options cannot be used together."
+        raise typer.BadParameter(errmsg)
 
     try:
         graph_config = get_graph_config(common_opts)
