@@ -13,17 +13,10 @@ from outtaoutlook.graphapi import (
     log_message_notice,
 )
 from outtaoutlook.shared import (
-    ExportAbortedError,
     logger,
 )
 
-from .output_core import OutputWorkerCore
-from .shared import (
-    ExportStat,
-    abort_workers_event,
-    exportstat_incr,
-    write_output_file,
-)
+from .output_core import ExportStat, OutputWorkerCore
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -85,7 +78,7 @@ class OutputWorkerEml(OutputWorkerCore):
 
         self._batch_request_id_start = 1
 
-    def update_list_messages_params(self: Self, params: dict[str, str | int]) -> None:
+    def update_messages_params(self: Self, params: dict[str, str | int]) -> None:
         """Update parameters used in the '/messages' Graph API request.
 
         Args:
@@ -109,7 +102,7 @@ class OutputWorkerEml(OutputWorkerCore):
         """
         return super().get_file_path(message).with_suffix(".eml")
 
-    def export_message(
+    def export_write_message(
         self: Self,
         message: GraphMessageT,
         file_path: Path,
@@ -126,7 +119,6 @@ class OutputWorkerEml(OutputWorkerCore):
             int: The number of messages processed. Typically 1, but can be 0 if queued for later and >0 when processed.
 
         Raises:
-            requests.RequestException derived error (e.g. ConnectionError, emlDecodeError, HTTPError, etc.)
             OSError derived error (e.g. file system errors, permission errors, etc.)
         """
         message_id: str | None = message.get("id")
@@ -145,7 +137,7 @@ class OutputWorkerEml(OutputWorkerCore):
             return self._flush_queue()
         return 0
 
-    def last_batch_complete(self: Self) -> int:
+    def finalize_export(self: Self) -> int:
         """Called after the last batch of messages for a folder is complete.."""
         if len(self._queued_messages):
             return self._flush_queue()
@@ -155,18 +147,13 @@ class OutputWorkerEml(OutputWorkerCore):
     # Internal methods
 
     def _flush_queue(self) -> int:
-        def _update_progress(status: str) -> None:
-            self.progress.update(
-                self.progress_task_id,
-                status=status,
-                refresh=True,
-            )
 
         def _batch_request_id(idx: int) -> str:
-            folder_name = self.folder["displayName"]
-            return f"{folder_name}-{self._batch_request_id_start + idx}"
+            """Outlook message IDs are too long to use as batch request IDs so we use a shorter one."""
+            return f"{self.folder_name}-{self._batch_request_id_start + idx}"
 
         assert len(self._queued_messages) > 0  # noqa: S101
+        assert self.session is not None  # noqa: S101
 
         logger.debug("Processing %d queued messages", len(self._queued_messages))
 
@@ -180,7 +167,7 @@ class OutputWorkerEml(OutputWorkerCore):
             "ids": sorted(self._queued_messages),
         }
 
-        _update_progress("fetching messages")
+        self.progress_update(status="fetching messages", refresh=True)
 
         # Submit a single Graph API request that returns $value for all the messages in our batch.
         responses = graph_get_resource_batch(
@@ -192,14 +179,13 @@ class OutputWorkerEml(OutputWorkerCore):
             short_key_factory=_batch_request_id,
         )
 
-        _update_progress("writing files")
+        self.progress_update(status="writing files", refresh=True)
 
         assert len(responses) == len(url_by_message_id)  # noqa: S101
         n_messages = len(responses)
 
         for request_id, response in responses.items():
-            if abort_workers_event.is_set():
-                raise ExportAbortedError
+            self.raise_if_cancelled()
 
             item = self._queued_messages.pop(request_id)  # dequeue
 
@@ -219,7 +205,9 @@ class OutputWorkerEml(OutputWorkerCore):
                         logging.ERROR,
                     )
 
-            self._real_export_message(item, content)
+            n_exported = self._real_export_message(item, content)
+            if n_exported:
+                self.manifest_ids.add(item.message["id"])
 
         self._batch_request_id_start += n_messages
 
@@ -236,12 +224,11 @@ class OutputWorkerEml(OutputWorkerCore):
             int: The number of messages processed. Typically 1, but can be 0 if queued for later and >0 when processed.
 
         Raises:
-            requests.RequestException derived error (e.g. ConnectionError, emlDecodeError, HTTPError, etc.)
             OSError derived error (e.g. file system errors, permission errors, etc.)
         """
 
         def _skip_message(skip_reason: ExportStat, level: int) -> int:
-            exportstat_incr(self.export_stats, skip_reason)
+            self.increxportstat(skip_reason)
             log_message_notice(item.message, skip_reason.value, level)
             return 1
 
@@ -258,8 +245,8 @@ class OutputWorkerEml(OutputWorkerCore):
             if not self.export_opts.with_attachments:
                 return _skip_message(ExportStat.STAT_SKIPPED_NO_MESSAGE_CONTENT_JUST_ATTACHMENTS, logging.INFO)
 
-        write_output_file(item.file_path, content, file_date, self.export_opts)
+        self.write_output_file(item.file_path, content, file_date)
 
-        exportstat_incr(self.export_stats, ExportStat.STAT_FILE_CREATED)
+        self.increxportstat(ExportStat.STAT_FILE_CREATED)
 
         return 1

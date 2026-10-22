@@ -14,18 +14,9 @@ from html_to_markdown import ConversionOptions
 from html_to_markdown import convert as convert_to_markdown
 
 from outtaoutlook.graphapi import GraphFolderT, GraphMessageT, log_message_notice
-from outtaoutlook.shared import (
-    FileMetaPropT,
-    datetime_now,
-)
+from outtaoutlook.shared import FileMetaPropT, datetime_now
 
-from .output_core import OutputWorkerCore
-from .shared import (
-    ExportOptions,
-    ExportStat,
-    exportstat_incr,
-    write_output_file,
-)
+from .output_core import ExportOptions, ExportStat, OutputWorkerCore
 
 ######################################################################
 # Constants
@@ -396,19 +387,21 @@ def _md_link_text(rel_path_or_uri: str, *, inline: bool) -> str:
 class OutputWorkerMarkdown(OutputWorkerCore):
     """Implements the `OutputWorkerCore` for Markdown output."""
 
-    def set_export_opts(self: Self) -> None:
+    def update_export_opts(self: Self) -> None:
         """Set and optionally update export options for messages in the current folder."""
+        super().update_export_opts()
+
         # Dynamic variables that can be referenced in tags and metadata properties.
         folder_tag_vars = {
-            "{folder.displayName}": self.folder["displayName"],
-            "{folder.folderPath}": self.folder["folderPath"],
+            "{folder.displayName}": self.folder_name,
+            "{folder.folderPath}": str(self.folder_path),
         }
 
         self.export_opts.md_tags = _expand_folder_tags(self.folder, self.export_opts.md_tags, folder_tag_vars)
         self.export_opts.md_body_tags = _expand_folder_tags(self.folder, self.export_opts.md_body_tags, folder_tag_vars)
         self.export_opts.md_metaprop = _expand_folder_metaprop(self.folder, self.export_opts.md_metaprop, folder_tag_vars)
 
-    def update_list_messages_params(self: Self, params: dict[str, str | int]) -> None:
+    def update_messages_params(self: Self, params: dict[str, str | int]) -> None:
         """Update parameters used in the '/messages' Graph API request.
 
         Args:
@@ -430,7 +423,7 @@ class OutputWorkerMarkdown(OutputWorkerCore):
         """
         return super().get_file_path(message).with_suffix(".md")
 
-    def export_message(  # noqa: C901, PLR0912
+    def export_write_message(  # noqa: C901, PLR0912
         self: Self,
         message: GraphMessageT,
         file_path: Path,
@@ -452,7 +445,7 @@ class OutputWorkerMarkdown(OutputWorkerCore):
         """
 
         def _skip_message(skip_reason: ExportStat, level: int) -> int:
-            exportstat_incr(self.export_stats, skip_reason)
+            self.increxportstat(skip_reason)
             log_message_notice(message, skip_reason.value, level)
             return 1
 
@@ -540,8 +533,8 @@ class OutputWorkerMarkdown(OutputWorkerCore):
 
         file_text = "\n".join(file_content).strip() + "\n"
 
-        write_output_file(file_path, file_text, file_date, self.export_opts)
+        self.write_output_file(file_path, file_text, file_date)
 
-        exportstat_incr(self.export_stats, ExportStat.STAT_FILE_CREATED)
+        self.increxportstat(ExportStat.STAT_FILE_CREATED)
 
         return 1

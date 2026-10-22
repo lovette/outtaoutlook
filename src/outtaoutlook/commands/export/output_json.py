@@ -1,42 +1,15 @@
 """Export messages as JSON files."""
 
 import json
-from datetime import datetime
 from typing import TYPE_CHECKING, Self
 
-from .output_core import OutputWorkerCore
-from .shared import (
-    ExportStat,
-    exportstat_incr,
-    write_output_file,
-)
+from .output_core import ExportStat, OutputWorkerCore
+from .shared import json_serializer
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from outtaoutlook.graphapi import GraphMessageT
-
-######################################################################
-# Helpers
-
-
-def _json_serial(obj: object) -> str:
-    """JSON serializer for objects not serializable by `json.dumps`.
-
-    Args:
-        obj (Any): _description_
-
-    Raises:
-        TypeError: _description_
-
-    Returns:
-        str: _description_
-    """
-    if isinstance(obj, datetime):
-        return obj.isoformat()
-
-    msg = f"Object of type {type(obj)} is not JSON serializable"
-    raise TypeError(msg)
 
 
 ######################################################################
@@ -46,7 +19,7 @@ def _json_serial(obj: object) -> str:
 class OutputWorkerJson(OutputWorkerCore):
     """Implements the `OutputWorkerCore` for JSON output."""
 
-    def update_list_messages_params(self: Self, params: dict[str, str | int]) -> None:
+    def update_messages_params(self: Self, params: dict[str, str | int]) -> None:
         """Update parameters used in the '/messages' Graph API request.
 
         Args:
@@ -68,7 +41,7 @@ class OutputWorkerJson(OutputWorkerCore):
         """
         return super().get_file_path(message).with_suffix(".json")
 
-    def export_message(
+    def export_write_message(
         self: Self,
         message: GraphMessageT,
         file_path: Path,
@@ -96,10 +69,10 @@ class OutputWorkerJson(OutputWorkerCore):
         message_copy.pop("@odata.etag", None)
         message_copy.pop("fileTitle", None)
 
-        file_text = json.dumps(message_copy, sort_keys=True, default=_json_serial)
+        file_text = json.dumps(message_copy, sort_keys=True, default=json_serializer)
 
-        write_output_file(file_path, file_text, file_date, self.export_opts)
+        self.write_output_file(file_path, file_text, file_date)
 
-        exportstat_incr(self.export_stats, ExportStat.STAT_FILE_CREATED)
+        self.increxportstat(ExportStat.STAT_FILE_CREATED)
 
         return 1

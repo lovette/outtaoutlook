@@ -1,18 +1,12 @@
 """Shared helpers and constants for the export command."""
 
-import os
-import threading
-from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum
+from pathlib import Path
 from typing import TYPE_CHECKING
 
-from outtaoutlook.shared import logger
-
 if TYPE_CHECKING:
-    from datetime import datetime
-    from pathlib import Path
-
     from outtaoutlook.shared import FileMetaPropT
 
 ######################################################################
@@ -37,23 +31,6 @@ class OutputFormatChoice(StrEnum):
     html = "html"
     json = "json"
     md = "md"
-
-
-class ExportStat(StrEnum):
-    """Export statistic messages."""
-
-    STAT_FILE_CREATED = "Files created"
-    STAT_ATTACHMENT_SAVED = "Attachments saved"
-    STAT_SKIPPED_DUPLICATE = "Skipped; Message already exported"
-    STAT_SKIPPED_MARKDOWN_CONVERSION_FAILED = "Skipped; Markdown conversion failed"
-    STAT_SKIPPED_NO_MESSAGE_BODY = "Skipped; No message body"
-    STAT_SKIPPED_NO_MESSAGE_CONTENT_JUST_ATTACHMENTS = "Skipped; No file content, just attachments (not being saved)"
-    STAT_SKIPPED_NO_MESSAGE_CONTENT_NO_ATTACHMENTS = "Skipped; No file content"
-    STAT_SKIPPED_NO_MESSAGE_CONTENT_UNKNOWN = "Skipped; No file content, unknown reason"
-    STAT_SKIPPED_EVENT_MESSAGE = "Skipped; Calendar event"
-
-
-ExportStatsT = dict[ExportStat, int]
 
 
 @dataclass
@@ -83,72 +60,26 @@ class ExportOptions:
     max_workers: int  # Maximum number of workers being used for exporting.
 
 
-@dataclass
-class ExportResult:
-    """Results of folder export."""
-
-    aborted: bool = False  # Whether the export was aborted.
-    messages: defaultdict[int, list[str]] = field(default_factory=lambda: defaultdict(list))  # {level:[message]}
-    stats: ExportStatsT | None = None  # Export statistics keyed by ExportStat.
-
-
-######################################################################
-# Global variables
-
-
-# Keep track of whether the first thread spawned has received its first batch of messages.
-list_messages_success_event = threading.Event()
-
-# Any worker can signal for all other workers to abort.
-abort_workers_event = threading.Event()
-
-
 ######################################################################
 # Public functions
 
 
-def exportstat_incr(export_stats: ExportStatsT, stat: ExportStat, incr: int = 1) -> None:
-    """Increment specified export stat.
+def json_serializer(obj: object) -> str:
+    """JSON serializer for objects not serializable by `json.dumps`.
 
     Args:
-        export_stats (ExportStatsT): Export stats dictionary.
-        stat (ExportStat): Stat to increment.
-        incr (int, optional): Increment amount. Defaults to 1.
+        obj (Any): _description_
+
+    Raises:
+        TypeError: _description_
+
+    Returns:
+        str: _description_
     """
-    export_stats[stat] = export_stats.get(stat, 0) + incr
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    if isinstance(obj, Path):
+        return str(obj)
 
-
-def write_output_file(
-    file_path: Path,
-    file_text: str,
-    file_date: datetime | None,
-    export_opts: ExportOptions,
-) -> None:
-    """Write output file and set its modification date.
-
-    Args:
-        file_path (Path): Output file path.
-        file_text (str): File content.
-        file_date (datetime | None): Modification date. If None, the file's modification date will not be set.
-        export_opts (ExportOptions): Export options.
-    """
-    if not export_opts.dry_run:
-        file_path.write_text(file_text, encoding="utf-8")
-
-        if file_date:
-            os.utime(file_path, (file_date.timestamp(), file_date.timestamp()))
-
-        logger.debug("Wrote file to '%s'", file_path.name)
-    else:
-        logger.debug("Wrote file to '%s' (dry run)", file_path.name)
-
-
-def signal_list_messages_success(thread_id: int) -> None:
-    """Signal to other workers that they can proceed with their work.
-
-    Args:
-        thread_id (int): Current thread ID.
-    """
-    if thread_id == 1 and not list_messages_success_event.is_set():
-        logger.debug("Releasing workers")
-        list_messages_success_event.set()
+    msg = f"Object of type {type(obj)} is not JSON serializable"
+    raise TypeError(msg)

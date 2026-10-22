@@ -5,12 +5,7 @@ from typing import TYPE_CHECKING, Self
 
 from outtaoutlook.graphapi import GraphMessageT, log_message_notice
 
-from .output_core import OutputWorkerCore
-from .shared import (
-    ExportStat,
-    exportstat_incr,
-    write_output_file,
-)
+from .output_core import ExportStat, OutputWorkerCore
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -41,7 +36,7 @@ SELECT_MESSAGE_FIELDS = ",".join(
 class OutputWorkerHtml(OutputWorkerCore):
     """Implements the `OutputWorkerCore` for HTML output."""
 
-    def update_list_messages_params(self: Self, params: dict[str, str | int]) -> None:
+    def update_messages_params(self: Self, params: dict[str, str | int]) -> None:
         """Update parameters used in the '/messages' Graph API request.
 
         Args:
@@ -63,7 +58,7 @@ class OutputWorkerHtml(OutputWorkerCore):
         """
         return super().get_file_path(message).with_suffix(".html")
 
-    def export_message(
+    def export_write_message(
         self: Self,
         message: GraphMessageT,
         file_path: Path,
@@ -80,12 +75,12 @@ class OutputWorkerHtml(OutputWorkerCore):
             int: The number of messages processed. Typically 1, but can be 0 if queued for later and >0 when processed.
 
         Raises:
-            requests.RequestException derived error (e.g. ConnectionError, htmlDecodeError, HTTPError, etc.)
+            requests.RequestException derived error (e.g. ConnectionError, JSONDecodeError, HTTPError, etc.)
             OSError derived error (e.g. file system errors, permission errors, etc.)
         """
 
         def _skip_message(skip_reason: ExportStat, level: int) -> int:
-            exportstat_incr(self.export_stats, skip_reason)
+            self.increxportstat(skip_reason)
             log_message_notice(message, skip_reason.value, level)
             return 1
 
@@ -111,8 +106,8 @@ class OutputWorkerHtml(OutputWorkerCore):
             if not self.export_opts.with_attachments:
                 return _skip_message(ExportStat.STAT_SKIPPED_NO_MESSAGE_CONTENT_JUST_ATTACHMENTS, logging.INFO)
 
-        write_output_file(file_path, body_content, file_date, self.export_opts)
+        self.write_output_file(file_path, body_content, file_date)
 
-        exportstat_incr(self.export_stats, ExportStat.STAT_FILE_CREATED)
+        self.increxportstat(ExportStat.STAT_FILE_CREATED)
 
         return 1

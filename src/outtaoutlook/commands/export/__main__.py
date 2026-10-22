@@ -24,7 +24,7 @@ from outtaoutlook.graphapi import (
 )
 from outtaoutlook.shared import (
     CommandContext,
-    ExportAbortedError,
+    ExportCancelledError,
     ExportError,
     FileMetaPropT,
     console,
@@ -631,8 +631,8 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
     except GraphAuthRequiredError as err:
         err_console.print(f"{err} {AUTH_ERROR_USECOMMAND}")
         raise typer.Exit(code=1) from err
-    except ExportAbortedError as err:
-        # Whichever thread signaled the abort already logged the reason...
+    except ExportCancelledError as err:
+        # Whichever thread signaled the cancellation already logged the reason...
         raise typer.Exit(code=1) from err
     except (ExportError, ValueError, OSError) as err:
         err_console.print(f"Error: {err}")

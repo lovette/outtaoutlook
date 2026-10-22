@@ -2,18 +2,22 @@
 
 import base64
 import binascii
-import copy
 import json
 import logging
 import mimetypes
 import os
+import threading
 from abc import ABC, abstractmethod
+from collections import defaultdict
+from dataclasses import dataclass, field
 from datetime import datetime
+from enum import StrEnum
+from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Self
 
 import requests
-from requests import sessions
+from requests import Session
 
 from outtaoutlook.graphapi import (
     GRAPH_API_URL,
@@ -27,7 +31,7 @@ from outtaoutlook.graphapi import (
     log_message_notice,
 )
 from outtaoutlook.shared import (
-    ExportAbortedError,
+    ExportCancelledError,
     ExportError,
     datetime_now,
     get_hash_filename,
@@ -41,16 +45,11 @@ from .shared import (
     ATTACHMENTS_FOLDER_FILE,
     ATTACHMENTS_FOLDER_ROOT,
     ExportOptions,
-    ExportResult,
-    ExportStat,
-    ExportStatsT,
-    abort_workers_event,
-    exportstat_incr,
-    signal_list_messages_success,
+    json_serializer,
 )
 
 if TYPE_CHECKING:
-    from rich.progress import Progress, TaskID
+    from rich.progress import Progress, Task, TaskID
 
 
 ######################################################################
@@ -59,6 +58,7 @@ if TYPE_CHECKING:
 
 TITLE_UNTITLED = "Untitled"
 MIN_PROGRESS_THRESHOLD = 10  # Hide progress if only a few messages
+LIST_MESSAGES_SUCCESS_EVENT_WAIT = 60  # seconds; just a failsafe, I don't expect there to be any deadlocking :)
 
 ATTACHMENT_DEFAULT_SUFFIX = ".bin"
 ATTACHMENT_DEFAULT_NAME = "unnamed"  # suffix will be guessed
@@ -83,17 +83,60 @@ MESSAGE_DATE_FIELDS = ["createdDateTime", "lastModifiedDateTime", "sentDateTime"
 
 
 ######################################################################
+# Types and classes
+
+
+class ExportStat(StrEnum):
+    """Export statistic messages."""
+
+    STAT_FILE_CREATED = "Files created"
+    STAT_ATTACHMENT_SAVED = "Attachments saved"
+    STAT_SKIPPED_DUPLICATE = "Skipped; Message already exported"
+    STAT_SKIPPED_MARKDOWN_CONVERSION_FAILED = "Skipped; Markdown conversion failed"
+    STAT_SKIPPED_NO_MESSAGE_BODY = "Skipped; No message body"
+    STAT_SKIPPED_NO_MESSAGE_CONTENT_JUST_ATTACHMENTS = "Skipped; No file content, just attachments (not being saved)"
+    STAT_SKIPPED_NO_MESSAGE_CONTENT_NO_ATTACHMENTS = "Skipped; No file content"
+    STAT_SKIPPED_NO_MESSAGE_CONTENT_UNKNOWN = "Skipped; No file content, unknown reason"
+    STAT_SKIPPED_EVENT_MESSAGE = "Skipped; Calendar event"
+
+
+ExportStatsT = dict[ExportStat, int]
+
+
+@dataclass
+class ExportResult:
+    """Results of folder export."""
+
+    failed: bool = False  # Whether the export failed.
+    cancelled: bool = False  # Whether the export was cancelled.
+    messages: defaultdict[int, list[str]] = field(default_factory=lambda: defaultdict(list))  # {level:[message]}
+
+    def add_message(self, message: str, level: int = logging.INFO) -> None:
+        """Add a message to the export result.
+
+        Args:
+            message (str): Message text.
+            level (int): Logging level (e.g., logging.INFO, logging.WARNING, logging.ERROR).
+        """
+        self.messages[level].append(message)
+
+
+######################################################################
 # Export folder worker core
 
 
 class OutputWorkerCore(ABC):
     """Export folder worker core."""
 
-    def __init__(  # noqa: PLR0913, PLR0917
+    # Keep track of whether the first worker has received its first batch of messages.
+    _messages_success_event = threading.Event()
+
+    # Any worker can signal for all other workers to cancel exporting messages.
+    _workers_cancelled_event = threading.Event()
+
+    def __init__(
         self,
-        thread_id: int,
         folder: GraphFolderT,
-        session: sessions.Session,
         graph_config: GraphApiConfig,
         progress: Progress,
         progress_task_id: TaskID,
@@ -102,28 +145,24 @@ class OutputWorkerCore(ABC):
         """Initialize the export folder worker.
 
         Args:
-            thread_id (int): Worker thread ID.
             folder (GraphFolderT): Folder object.
-            session (sessions.Session): Session to use to pool requests.
             graph_config (GraphApiConfig): Graph API configuration.
             progress (Progress): Progress bar object.
             progress_task_id (TaskID): Progress bar task ID for this folder.
             export_opts (ExportOptions): Export options.
         """
-        self.thread_id = thread_id
+        self.thread_id: int | None = None
         self.folder = folder
-        self.session = session
+        self.session: Session | None = None
         self.graph_config = graph_config
         self.progress = progress
         self.progress_task_id = progress_task_id
+        self.export_opts = export_opts
+        self.export_stats: ExportStatsT = {}
+        self.export_result = ExportResult()
+        self.manifest_ids: set[str] = set()
 
-        # Copy options so we can tweak without modifying caller
-        self.export_opts = copy.copy(export_opts)
-
-        # Start with stats that will always be output
-        self.export_stats: ExportStatsT = {
-            ExportStat.STAT_FILE_CREATED: 0,
-        }
+        self.update_export_opts()
 
     ######################################################################
     # Helper methods
@@ -146,10 +185,10 @@ class OutputWorkerCore(ABC):
         except ValueError:
             return None
 
-    def _export_mkdir(
+    def _mkdir(
         self,
         dir_path: Path,
-        name: str,
+        purpose: str,
         *,
         parents: bool = False,
         exist_ok: bool = True,
@@ -158,7 +197,7 @@ class OutputWorkerCore(ABC):
 
         Args:
             dir_path (Path): Directory path.
-            name (str): Purpose of the directory (used for logging.)
+            purpose (str): Purpose of the directory (used for logging.)
             parents (bool, optional): Whether to create parent directories if they don't exist. Defaults to False.
             exist_ok (bool, optional): Whether to ignore the error if the directory already exists. Defaults to True.
         """
@@ -167,12 +206,12 @@ class OutputWorkerCore(ABC):
                 try:
                     dir_path.mkdir(parents=parents, exist_ok=exist_ok)
                 except OSError as err:
-                    logger.error("Failed to create %s directory: %s", name, str(err))
+                    logger.error("Failed to create %s directory: %s", purpose, str(err))
                     raise
 
-                logger.info("Created %s directory '%s'", name, dir_path)
+                logger.info("Created %s directory '%s'", purpose, dir_path)
             else:
-                logger.info("Created %s directory '%s' (dry run)", name, dir_path)
+                logger.info("Created %s directory '%s' (dry run)", purpose, dir_path)
 
     def _list_messages(
         self,
@@ -189,15 +228,52 @@ class OutputWorkerCore(ABC):
             GraphApiReturnT: JSON response from the Microsoft Graph API.
 
         Raises:
+            ExportError if an export error occurred.
             requests.RequestException derived error (e.g. ConnectionError, JSONDecodeError, HTTPError, etc.)
             OSError derived error (e.g. file system errors, permission errors, etc.)
         """
+        assert self.session is not None  # noqa: S101
+
         headers = {
             # https://learn.microsoft.com/en-us/graph/outlook-immutable-id
             "Prefer": 'IdType="ImmutableId"',
         }
 
-        return graph_get_resource(self.session, self.graph_config, url, params=params, headers=headers)
+        self.progress_update(status="fetching messages", refresh=True)
+
+        try:
+            data = graph_get_resource(
+                self.session,
+                self.graph_config,
+                url,
+                params=params,
+                headers=headers,
+            )
+
+        except requests.HTTPError:
+            if self.export_opts.filter_query:
+                field = "filter"
+            elif self.export_opts.search_query:
+                field = "search"
+            else:
+                field = None
+
+            if field:
+                # Try to be somewhat helpful
+                self.progress.print(
+                    f"[red]Error: Failed to list messages in folder '{self.folder_path}', "
+                    f"possibly due to '{field}' criteria syntax errors.",
+                )
+
+                self.emit_log("Cancelling export due to filter/search criteria error", logging.DEBUG)
+
+            raise
+        else:
+            # Now that we know that the first batch of messages has been
+            # successfully retrieved, we can release the other workers.
+            self.release_workers()
+
+        return data
 
     def _list_attachments(
         self,
@@ -216,11 +292,12 @@ class OutputWorkerCore(ABC):
             OSError derived error (e.g. file system errors, permission errors, etc.)
         """
         # Best I can tell, '/attachments' returns all attachments and has no 'nextLink'
+        assert self.session is not None  # noqa: S101
         url = f"{GRAPH_API_URL}/me/messages/{message.get('id')}/attachments"
         data = graph_get_resource(self.session, self.graph_config, url)
         return data.get("value", [])
 
-    def _get_attachment_content(  # noqa: C901
+    def _get_attachment_content(  # noqa: C901, PLR0915
         self,
         message: GraphMessageT,
         attachment: GraphAttachmentT,
@@ -246,6 +323,7 @@ class OutputWorkerCore(ABC):
 
         def _get_item_expanded_content() -> tuple[dict[str, Any], str | None]:
             # Get properties of the attached contact, event, or message.
+            assert self.session is not None  # noqa: S101
             url = f"{GRAPH_API_URL}/me/messages/{message.get('id')}/attachments/{attachment.get('id')}"
             params = {"$expand": "microsoft.graph.itemattachment/item"}
             data = graph_get_resource(self.session, self.graph_config, url, params=params)
@@ -254,6 +332,7 @@ class OutputWorkerCore(ABC):
 
         def _get_item_value() -> tuple[str | None, str | None]:
             # Get raw attachment content for a contact, event or message.
+            assert self.session is not None  # noqa: S101
             url = f"{GRAPH_API_URL}/me/messages/{message.get('id')}/attachments/{attachment.get('id')}/$value"
             data = graph_get_resource(self.session, self.graph_config, url)
             content, content_type = data.get("contentBytes"), data.get("contentType")
@@ -358,7 +437,7 @@ class OutputWorkerCore(ABC):
         assert self.export_opts.attachments_folder.is_absolute()  # noqa: S101
 
         # Create attachments directory the first time an attachment is saved.
-        self._export_mkdir(
+        self._mkdir(
             self.export_opts.attachments_folder,
             "attachments",
             parents=self.export_opts.attachments_mkdir,
@@ -367,15 +446,15 @@ class OutputWorkerCore(ABC):
         attachment_path = unique_file_path(self.export_opts.attachments_folder / Path(attachment["name"]), file_date)
 
         if self.export_opts.dry_run:
-            logger.debug("Wrote attachment to '%s' (%s) (dry run)", attachment_path.name, content_type)
+            self.emit_log(f"Wrote attachment to '{attachment_path.name}' ({content_type}) (dry run)", logging.DEBUG)
         elif content_type and content_type.startswith(("text/", "message/")):
             attachment_path.write_text(content, encoding="utf-8")
-            logger.debug("Wrote attachment to '%s' (%s)", attachment_path.name, content_type)
+            self.emit_log(f"Wrote attachment to '{attachment_path.name}' ({content_type})", logging.DEBUG)
         else:
             try:
                 with attachment_path.open("wb") as f:
                     f.write(base64.b64decode(content))
-                logger.debug("Wrote attachment to '%s' (%s)", attachment_path.name, content_type)
+                self.emit_log(f"Wrote attachment to '{attachment_path.name}' ({content_type})", logging.DEBUG)
             except binascii.Error as err:
                 log_message_notice(message, f'attachment("{attachment_path.name}"): b64decode failed: {err}', logging.ERROR)
                 return None
@@ -409,6 +488,8 @@ class OutputWorkerCore(ABC):
         attachment_paths: list[Path] = []
 
         for attachment in self._list_attachments(message):
+            self.raise_if_cancelled()
+
             attachment_path = self._save_attachment(
                 message,
                 attachment,
@@ -421,11 +502,11 @@ class OutputWorkerCore(ABC):
 
         return attachment_paths
 
-    def _export_message(  # noqa: C901
+    def _export_write_message(  # noqa: C901
         self,
         message: GraphMessageT,
     ) -> int:
-        """Export a message.
+        """Prepares message and writes a message to a file (internal use only).
 
         Args:
             message (GraphMessageT): The message.
@@ -489,7 +570,7 @@ class OutputWorkerCore(ABC):
         if not message_id:
             # I don't expect this to ever happen, but just in case.
             log_message_notice(message, "'id' field is not set!", logging.ERROR)
-            return 0
+            return 1
 
         _fix_dates(message, bool(is_draft))
 
@@ -504,9 +585,9 @@ class OutputWorkerCore(ABC):
         if is_calendar_related:
             # Calendar requests and responses are skipped
             skip_reason, level = ExportStat.STAT_SKIPPED_EVENT_MESSAGE, logging.DEBUG
-            exportstat_incr(self.export_stats, skip_reason)
+            self.increxportstat(skip_reason)
             log_message_notice(message, skip_reason.value, level)
-            return 0  # don't write empty files
+            return 1  # don't write empty files
 
         file_path = self.get_file_path(message)
 
@@ -518,10 +599,10 @@ class OutputWorkerCore(ABC):
                 file_date,
             )
 
-            exportstat_incr(self.export_stats, ExportStat.STAT_ATTACHMENT_SAVED, len(attachment_paths))
+            self.increxportstat(ExportStat.STAT_ATTACHMENT_SAVED, len(attachment_paths))
 
         # Export the message in specified format.
-        return self.export_message(
+        return self.export_write_message(
             message,
             file_path,
             attachment_paths,
@@ -533,8 +614,7 @@ class OutputWorkerCore(ABC):
         url: str,
         params: dict[str, str | int] | None,
         batch_limit: int,
-        exported_ids: set[str],
-    ) -> tuple[int, str | None]:
+    ) -> tuple[int, int, str | None]:
         """Export a batch of messages from a specific folder.
 
         Args:
@@ -542,60 +622,331 @@ class OutputWorkerCore(ABC):
             url (str): The URL for the API request.
             params (dict[str, str | int] | None): The query parameters for the API request.
             batch_limit (int): The maximum number of messages to export in this batch.
-            exported_ids (set[str]): The set of message IDs that have already been exported. Modified in-place.
 
         Returns:
-            tuple[int, str | None]: [Number of messages exported in this batch (including dups),
+            tuple[int, int, str | None]: [Number of messages exported in this batch (including dups),
+                Number of messages actually written in this batch,
                 Link to next batch of messages or None if there are no more batches]
 
         Raises:
             requests.RequestException derived error (e.g. ConnectionError, JSONDecodeError, HTTPError, etc.)
             OSError derived error (e.g. file system errors, permission errors, etc.)
         """
-        self.progress.update(self.progress_task_id, status="fetching messages", refresh=True)
-
         data = first_batch_data or self._list_messages(url, params=params)
 
         messages = data.get("value", [])
         next_url = data.get("@odata.nextLink")
 
-        self.progress.update(self.progress_task_id, status="writing files", refresh=True)
+        self.progress_update(status="evaluating", refresh=True)  # don't say writing when we're not writing yet
+
+        n_written_total = 0
+        update_status = True
 
         for message in messages:
-            if abort_workers_event.is_set():
-                raise ExportAbortedError
+            self.raise_if_cancelled()
 
-            n_exported = 1  # count processed even if in manifest
-
-            if message["id"] not in exported_ids:
-                n_exported = self._export_message(
-                    message,
-                )
-
-                exported_ids.add(message["id"])
+            if message["id"] not in self.manifest_ids:
+                n_written = self._export_write_message(message)  # will be 0 if queued
+                self.manifest_ids.add(message["id"])
+                n_written_total += n_written
             else:
-                exportstat_incr(self.export_stats, ExportStat.STAT_SKIPPED_DUPLICATE)
+                n_written = 1  # count processed even if in manifest
+                self.increxportstat(ExportStat.STAT_SKIPPED_DUPLICATE)
 
-            if n_exported:
-                self.progress.update(self.progress_task_id, advance=n_exported)
+            if n_written_total > 0 and update_status:
+                self.progress_update(status="writing files", refresh=True)
+                update_status = False
+
+            if n_written:
+                self.progress_update(advance=n_written)
 
             batch_limit -= 1
             if batch_limit <= 0:
                 break
 
-        return len(messages), next_url
+        return len(messages), n_written_total, next_url
+
+    def emit_log(self, errmsg: str, level: int = logging.INFO) -> None:
+        """Emit a log message for the current folder.
+
+        Args:
+            errmsg (str): The error message to log.
+            level (int, optional): The logging level. Defaults to logging.INFO.
+        """
+        logger.log(level, 'Folder("%s"): %s', self.folder_path, errmsg)
+
+    def set_failed(self, reason: str, *, raise_now: bool = False) -> None:
+        """Mark the export as failed and update progress bar task status.
+
+        Also releases workers waiting to be released.
+
+        Args:
+            reason (str): The reason for the failure.
+            raise_now (bool, optional): True to raise ExportCancelledError immediately. Defaults to False.
+        """
+        reason = f"Export failed: {reason}"
+        self.emit_log(reason, logging.ERROR)
+
+        self.export_result.failed = True
+        self.progress_update(status="failed")
+
+        # If one worker fails, we bring everything to an end.
+        self.cancel_workers(reason, raise_now=raise_now)
+
+    def set_cancelled(self, reason: str, *, raise_now: bool = False) -> None:
+        """Mark the export as cancelled and update progress bar task status.
+
+        Args:
+            reason (str): The reason for the cancellation.
+            raise_now (bool, optional): True to raise ExportCancelledError immediately. Defaults to False.
+        """
+        reason = f"Export cancelled: {reason}"
+        self.emit_log(reason, logging.DEBUG)
+
+        self.export_result.cancelled = True
+        self.progress_update(status="cancelled")
+
+        if raise_now:
+            raise ExportCancelledError
+
+    def cancel_workers(self, reason: str | None = None, *, raise_now: bool = False) -> None:
+        """Set event that signals all workers to stop exporting messages.
+
+        Also releases workers waiting to be released.
+
+        Args:
+            reason (str | None): The reason for cancelling the workers.
+            raise_now (bool, optional): True to raise ExportCancelledError immediately. Defaults to False.
+
+        Raises:
+            ExportCancelledError
+        """
+        if not self.workers_cancelled:
+            reason = f": {reason}" if reason else "."
+            self.emit_log(f"All workers cancelled{reason}", logging.DEBUG)
+
+        self._workers_cancelled_event.set()
+
+        # Ensure all workers are released.
+        self.release_workers()
+
+        if raise_now:
+            raise ExportCancelledError
+
+    def raise_if_cancelled(self) -> None:
+        """If workers have been cancelled, set our export status to cancelled and raise ExportCancelledError."""
+        if self.workers_cancelled:
+            self.set_cancelled("All workers have been cancelled.", raise_now=True)
+
+    def release_workers(self) -> None:
+        """Signal to other workers that they can proceed with their work."""
+        if not self._messages_success_event.is_set():
+            logger.debug("Releasing other workers")
+        self._messages_success_event.set()
+
+    def _wait_for_release_workers(self) -> None:
+        """Wait for first worker to release all the rest.
+
+        Raises:
+            ExportCancelledError: If the workers have been cancelled while waiting.
+        """
+        assert self.thread_id is not None  # noqa: S101
+
+        if self.thread_id > 1 and not self._messages_success_event.is_set():
+            self.emit_log("Waiting to be released", logging.DEBUG)
+
+            if not self._messages_success_event.wait(timeout=LIST_MESSAGES_SUCCESS_EVENT_WAIT):
+                self.set_failed("Timed out waiting for first worker to release workers.", raise_now=True)
+
+        # If any worker signals a cancellation, all work comes to a stop.
+        self.raise_if_cancelled()
+
+    @cached_property
+    def folder_id(self) -> str:
+        """Get folder Outlook identifier.
+
+        Identifiers are 120 characters in length and look like this:
+        'AAMkAGIzZTczZTJhLTNiM2UtN...CAQAo-r499r1UTpQZ9f71nCKHAALmwWqBAAA='
+
+        Returns:
+            str
+        """
+        return self.folder["id"]
+
+    @cached_property
+    def folder_name(self) -> str:
+        """Get folder name.
+
+        Returns:
+            str
+        """
+        return self.folder["displayName"]
+
+    @cached_property
+    def folder_path(self) -> Path:
+        """Get folder path.
+
+        Returns:
+            Path
+        """
+        return Path(self.folder["folderPath"])
+
+    @cached_property
+    def progress_task(self) -> Task:
+        """Get progress task associated with the folder.
+
+        Returns:
+            Task
+        """
+        progress_tasks = {task.id: task for task in self.progress.tasks}
+        return progress_tasks[self.progress_task_id]
+
+    @property
+    def workers_cancelled(self) -> bool:
+        """Get workers cancelled signal status.
+
+        Returns:
+            bool
+        """
+        return self._workers_cancelled_event.is_set()
+
+    @property
+    def has_results(self) -> bool:
+        """Return True if export has any results to report.
+
+        Returns:
+            bool
+        """
+        return bool(self.export_result.messages) or bool(self.export_stats)
+
+    @cached_property
+    def manifest_path(self) -> Path | None:
+        """Get manifest file path, or None if not using a manifest.
+
+        Returns:
+            Path | None
+        """
+        if not self.export_opts.manifest_dir:
+            return None
+        return self.export_opts.manifest_dir / get_hash_filename(self.folder_id, "export_manifest", ".json")
+
+    def _read_manifest(self) -> None:
+        """Read export manifest file if using a manifest."""
+        manifest_file_path = self.manifest_path
+        if manifest_file_path and manifest_file_path.is_file():
+            self.emit_log(f"Loading export manifest: '{manifest_file_path}'")
+            manifest_data = json.loads(manifest_file_path.read_text())
+            self.manifest_ids = set(manifest_data.get("messageImmutableIds", []))
+
+    def _write_manifest(self, *, emitlog: bool = False) -> None:
+        """Write export manifest file if using a manifest.
+
+        Args:
+            emitlog (bool, optional): Whether to emit a log message after writing the manifest. Defaults to False.
+        """
+        manifest_file_path = self.manifest_path
+        if manifest_file_path:
+            manifest_file_path.write_text(
+                json.dumps(
+                    {
+                        "date": datetime_now().isoformat(),
+                        "folderId": self.folder_id,
+                        "folderPath": self.folder_path,
+                        "messageImmutableIds": list(self.manifest_ids),
+                    },
+                    default=json_serializer,
+                ),
+            )
+
+            if emitlog:
+                self.emit_log(f"Wrote export manifest: '{manifest_file_path}'")
+
+    def increxportstat(self, stat: ExportStat, incr: int = 1) -> None:
+        """Increment specified export stat.
+
+        Args:
+            stat (ExportStat): Stat to increment.
+            incr (int, optional): Increment amount. Defaults to 1.
+        """
+        self.export_stats[stat] = self.export_stats.get(stat, 0) + incr
+
+    def write_output_file(
+        self,
+        file_path: Path,
+        file_text: str,
+        file_date: datetime | None,
+    ) -> None:
+        """Write output file and set its modification date.
+
+        Args:
+            file_path (Path): Output file path.
+            file_text (str): File content.
+            file_date (datetime | None): Modification date. If None, the file's modification date will not be set.
+        """
+        if not self.export_opts.dry_run:
+            file_path.write_text(file_text, encoding="utf-8")
+
+            if file_date:
+                os.utime(file_path, (file_date.timestamp(), file_date.timestamp()))
+
+            self.emit_log(f"Wrote file to '{file_path.name}'", logging.DEBUG)
+        else:
+            self.emit_log(f"Wrote file to '{file_path.name}' (dry run)", logging.DEBUG)
+
+    def prepare_export(self) -> None:
+        """Prepare to export messages."""
+        self.emit_log(f"Saving files to '{self.export_opts.files_dir}'")
+        self._mkdir(self.export_opts.files_dir, "files", parents=self.export_opts.files_mkdir)
+
+        # Note: Attachments directory will be created the first time an attachment is saved.
+        if self.export_opts.with_attachments:
+            self.emit_log(f"Saving attachments to '{self.export_opts.attachments_folder}'")
+
+    def progress_update(  # noqa: PLR0913
+        self,
+        *,
+        total: float | None = None,
+        completed: float | None = None,
+        advance: float | None = None,
+        visible: bool | None = None,
+        refresh: bool = False,
+        status: str | None = None,
+    ) -> None:
+        """Update folder export progress.
+
+        Args:
+            total (float, optional): Updates task.total if not None.
+            completed (float, optional): Updates task.completed if not None.
+            advance (float, optional): Add a value to task.completed if not None.
+            visible (bool, optional): Set visible flag if not None.
+            refresh (bool): Force a refresh of progress information. Default is False.
+            status (str, optional): Updates task status if not None.
+        """
+        kwargs = {}
+        if status:
+            kwargs["status"] = status
+
+        self.progress.update(
+            self.progress_task_id,
+            total=total,
+            completed=completed,
+            advance=advance,
+            visible=visible,
+            refresh=refresh,
+            **kwargs,
+        )
 
     ######################################################################
     # Abstract methods
 
     @abstractmethod
-    def export_message(
+    def export_write_message(
         self: Self,
         message: GraphMessageT,
         file_path: Path,
         attachment_paths: list[Path] | None,
     ) -> int:
-        """Export a message as a JSON file.
+        """Write a message to a file.
 
         Args:
             message (GraphMessageT): The message.
@@ -613,104 +964,51 @@ class OutputWorkerCore(ABC):
     ######################################################################
     # Public functions
 
-    def export(self) -> ExportResult:  # noqa: C901, PLR0912, PLR0915
+    def export(  # noqa: C901, PLR0912, PLR0915
+        self,
+        thread_id: int,
+        session: Session,
+    ) -> None:
         """Export messages from a specific folder to the output directory.
 
-        Returns:
-            ExportResult: The result of the export operation, including statistics and any filter test message.
+        Results of the export operation can be found in the `export_results` and `export_stats` properties.
+
+        Args:
+            thread_id (int): Thread ID of the worker.
+            session (Session): Session to use to pool requests.
 
         Raises:
+            ExportCancelledError if export was cancelled.
+            ExportError if a non-cancellable export error occurred.
             requests.RequestException derived error (e.g. ConnectionError, JSONDecodeError, HTTPError, etc.)
             OSError derived error (e.g. file system errors, permission errors, etc.)
         """
+        self.thread_id = thread_id
+        self.session = session
 
-        def _write_manifest(folder: GraphFolderT) -> None:
-            if manifest_file_path:
-                manifest_file_path.write_text(
-                    json.dumps(
-                        {
-                            "date": datetime_now().isoformat(),
-                            "folderId": folder["id"],
-                            "folderPath": folder["folderPath"],
-                            "messageImmutableIds": list(manifest_ids),
-                        },
-                    ),
-                )
+        # Wait for the first thread/worker to get its first batch of messages.
+        # This allows the first worker to encounter any issues with
+        # the Graph API before other workers proceed and encounter the same.
+        self._wait_for_release_workers()
 
-                logger.debug("Wrote export manifest: '%s'", manifest_file_path)
+        self.emit_log("Working on this folder...", logging.DEBUG)
 
-        def _emit_log(folder: GraphFolderT, errmsg: str, level: int = logging.INFO) -> None:
-            logger.log(level, 'Folder("%s"): %s', folder["folderPath"], errmsg)
+        # Reset task start time to get true elapsed time for this folder.
+        self.progress.reset(self.progress_task_id, start=True)
 
         folder_message_count = self.folder["totalItemCount"]
-        export_result = ExportResult(stats=self.export_stats)
 
         if not folder_message_count:
-            self.progress.update(self.progress_task_id, total=0, completed=0, status="empty folder", visible=False)
-            export_result.messages[logging.INFO].append("Folder is empty")
-            return export_result
+            self.progress_update(total=0, completed=0, status="empty folder", visible=False)
+            self.export_result.add_message("Folder is empty")
+            return
 
-        self.progress.update(self.progress_task_id, status="evaluating", refresh=True)
+        self.progress_update(status="evaluating", refresh=True)
 
-        manifest_ids: set[str] = set()
-        manifest_file_name = get_hash_filename(self.folder["id"], "export_manifest", ".json")
-        manifest_file_path = (self.export_opts.manifest_dir / manifest_file_name) if self.export_opts.manifest_dir else None
-
-        if manifest_file_path and manifest_file_path.is_file():
-            logger.info("Loading export manifest: '%s'", manifest_file_path)
-            manifest_data = json.loads(manifest_file_path.read_text())
-            manifest_ids = set(manifest_data.get("messageImmutableIds", []))
+        self._read_manifest()
 
         export_limit = self.export_opts.files_limit
-        exported_total_count = len(manifest_ids)
-        files_dir = self.export_opts.files_dir
-        attachments_folder = self.export_opts.attachments_folder
-        attachments_dir_path = Path(attachments_folder)  # assume it's an absolute path to start
-        attachments_mkdir = self.export_opts.attachments_mkdir
-
-        if self.export_opts.files_mkdir:
-            files_dir = files_dir / (
-                Path(self.folder["folderPath"])
-                if not self.export_opts.mkdir_maxdepth
-                else Path(*Path(self.folder["folderPath"]).parts[-self.export_opts.mkdir_maxdepth :])
-            )
-
-        if isinstance(attachments_folder, Path):
-            assert attachments_dir_path.is_dir()  # noqa: S101 ; caller should have verified!
-            assert attachments_dir_path.is_absolute()  # noqa: S101 ; caller should have verified!
-        elif attachments_folder.upper() == ATTACHMENTS_FOLDER_ROOT:
-            attachments_dir_path = self.export_opts.root_out_dir
-            attachments_mkdir = False
-        elif attachments_folder.upper().startswith(ATTACHMENTS_FOLDER_FILE):  # allow plural "FILES"
-            attachments_dir_path = files_dir
-            attachments_mkdir = False
-        elif not attachments_dir_path.is_absolute():
-            attachments_dir_path = files_dir / safe_file_name(attachments_folder, ATTACHMENTS_DEFAULT_FOLDER)
-            attachments_mkdir = False
-
-        if attachments_mkdir:
-            attachments_dir_path = attachments_dir_path / (
-                Path(self.folder["folderPath"])
-                if not self.export_opts.mkdir_maxdepth
-                else Path(*Path(self.folder["folderPath"]).parts[-self.export_opts.mkdir_maxdepth :])
-            )
-
-        if not self.export_opts.filter_test:
-            _emit_log(self.folder, f"Saving files to '{files_dir}'")
-            self._export_mkdir(files_dir, "files", parents=self.export_opts.files_mkdir)
-
-            if self.export_opts.with_attachments:
-                _emit_log(self.folder, f"Saving attachments to '{attachments_dir_path}'")
-                # Attachments directory will be created the first time an attachment is saved.
-
-        self.export_opts.files_dir = files_dir
-        self.export_opts.attachments_mkdir = attachments_mkdir
-        self.export_opts.attachments_folder = attachments_dir_path
-
-        self.set_export_opts()
-
-        if self.export_opts.with_attachments:
-            self.export_stats[ExportStat.STAT_ATTACHMENT_SAVED] = 0
+        exported_total_count = len(self.manifest_ids)
 
         # https://learn.microsoft.com/en-us/graph/query-parameters
         params: dict[str, str | int] | None = {
@@ -736,44 +1034,18 @@ class OutputWorkerCore(ABC):
 
         if exported_total_count and not self.export_opts.filter_test:
             params["$skip"] = exported_total_count  # skip already exported messages
-            exportstat_incr(self.export_stats, ExportStat.STAT_SKIPPED_DUPLICATE, incr=exported_total_count)
 
-        self.update_list_messages_params(params)
+        self.update_messages_params(params)
 
         if self.export_opts.filter_test:
             params["$select"] = "id"  # Might as well make the response shorter; this *overrides* everyone!
 
         # https://learn.microsoft.com/en-us/graph/api/resources/mail-api-overview
         # https://learn.microsoft.com/en-us/graph/api/message-get
-        next_url = f"{GRAPH_API_URL}/me/mailFolders/{self.folder['id']}/messages"
+        next_url = f"{GRAPH_API_URL}/me/mailFolders/{self.folder_id}/messages"
 
         # Request the first batch now so we can get a count of the results.
-        try:
-            first_batch_data = self._list_messages(next_url, params=params)
-        except requests.HTTPError:
-            if self.export_opts.filter_query:
-                field = "filter"
-            elif self.export_opts.search_query:
-                field = "search"
-            else:
-                field = None
-
-            if field:
-                # Try to be somewhat helpful
-                self.progress.print(
-                    f"[red]Error: Failed to list messages in folder '{self.folder['folderPath']}', "
-                    f"possibly due to '{field}' criteria syntax errors.",
-                )
-
-                _emit_log(self.folder, "Aborting due to filter/search criteria error", logging.DEBUG)
-
-            # If the first batch query fails due to filter or search criteria,
-            # there's no reason for other workers to continue.
-            raise
-
-        # Now that we know that the first batch of messages has been
-        # successfully retrieved, we can release the other workers.
-        signal_list_messages_success(self.thread_id)
+        first_batch_data = self._list_messages(next_url, params=params)
 
         first_batch_messages = first_batch_data.get("value", [])
 
@@ -782,14 +1054,8 @@ class OutputWorkerCore(ABC):
 
         if self.export_opts.filter_test:
             # Report the filtered message count next to task progress.
-            self.progress.update(
-                self.progress_task_id,
-                total=1,
-                completed=1,
-                status=f"{export_message_count} messages",
-            )
-
-            return export_result
+            self.progress_update(total=1, completed=1, status=f"{export_message_count} messages")
+            return
 
         if not export_message_count:
             if self.export_opts.filter_query:
@@ -799,12 +1065,11 @@ class OutputWorkerCore(ABC):
             else:
                 msg, level = f"Contains {folder_message_count} messages but Graph API result was empty", logging.ERROR
 
-            export_result.messages[level].append(msg)
+            self.export_result.add_message(msg, level)
 
-            return export_result
+            return
 
-        if not export_limit:
-            export_limit = export_message_count
+        export_limit = min(export_limit, export_message_count) if export_limit else export_message_count
 
         status_message = ["Exporting"]
 
@@ -817,60 +1082,109 @@ class OutputWorkerCore(ABC):
 
         status_message.append("messages")
 
-        if manifest_file_path:
+        if self.manifest_path:
             status_message.append("(skipping dups)")
         if self.export_opts.dry_run:
             status_message.append("(dry run)")
 
-        _emit_log(self.folder, " ".join(status_message))
+        self.emit_log(" ".join(status_message))
 
-        self.progress.update(
-            self.progress_task_id,
-            total=min(export_limit, export_message_count),
-            completed=exported_total_count,
-        )
+        self.progress_update(total=min(export_limit, export_message_count), completed=exported_total_count)
 
-        if True:
-            while next_url is not None and exported_total_count < export_limit:
-                if abort_workers_event.is_set():
-                    raise ExportAbortedError
+        # Start with stats that will always be output
+        self.increxportstat(ExportStat.STAT_FILE_CREATED, incr=0)
+        if self.export_opts.with_attachments:
+            self.increxportstat(ExportStat.STAT_ATTACHMENT_SAVED, incr=0)
+        if exported_total_count:
+            self.increxportstat(ExportStat.STAT_SKIPPED_DUPLICATE, incr=exported_total_count)
 
-                try:
-                    batch_total, next_url = self._export_folder_batch(
-                        first_batch_data,
-                        next_url,  # ignored when `first_batch_data` is set
-                        params,
-                        min(self.export_opts.batch_size, export_limit - exported_total_count),
-                        manifest_ids,
-                    )
+        self.prepare_export()
 
-                except requests.RequestException, ExportError, ValueError, OSError:
-                    # Try to keep the manifest up-to-date even if an error occurs.
-                    _write_manifest(self.folder)
-                    raise
-                else:
-                    # Doing this on every batch is inefficient for large folders but
-                    # ensures the manifest is mostly up-to-date if a truly fatal error occurs.
-                    _write_manifest(self.folder)
+        n_written_total = 0
 
-                exported_total_count += batch_total
-                params = None  # included in 'nextLink' automatically
-                first_batch_data = None
+        while next_url is not None and exported_total_count < export_limit:
+            self.raise_if_cancelled()
+
+            n_written = 0
+
+            try:
+                batch_total, n_written, next_url = self._export_folder_batch(
+                    first_batch_data,
+                    next_url,  # ignored when `first_batch_data` is set
+                    params,
+                    min(self.export_opts.batch_size, export_limit - exported_total_count),
+                )
+
+            except requests.RequestException, ExportError, ValueError, OSError:
+                # Try to keep the manifest up-to-date even if an error occurs.
+                self._write_manifest()
+                raise
+            else:
+                # Doing this on every batch is inefficient for large folders but
+                # ensures the manifest is mostly up-to-date if a truly fatal error occurs.
+                if n_written:
+                    self._write_manifest()
+
+            exported_total_count += batch_total
+            n_written_total += n_written
+            params = None  # included in 'nextLink' automatically
+            first_batch_data = None
 
         # Finish up any messages that may have been queued.
-        n_exported = self.last_batch_complete()
+        n_written = self.finalize_export()
+        n_written_total += n_written
 
-        self.progress.update(self.progress_task_id, advance=n_exported, status="done")
+        # The manifest isn't final until after `finalize_export`!
+        if n_written:
+            self._write_manifest(emitlog=True)
 
-        return export_result
+        self.progress_update(advance=n_written, status="done")
+
+        if not n_written_total:
+            self.emit_log("No files were written during the export.")
 
     ######################################################################
-    # Commong overridden methods
+    # Common overridden methods
 
-    def set_export_opts(self) -> None:  # noqa: B027
+    def update_export_opts(self) -> None:
         """Set and optionally update export options for messages in the current folder."""
+        files_dir = self.export_opts.files_dir
+        attachments_folder = self.export_opts.attachments_folder
+        attachments_dir_path = Path(attachments_folder)  # assume it's an absolute path to start
+        attachments_mkdir = self.export_opts.attachments_mkdir
 
-    def update_list_messages_params(self: Self, params: dict[str, str | int]) -> None:  # noqa: B027
+        # Determine the folder path to use when creating subdirectories for files and attachments.
+        # For example, if path is "A/B/C" and mkdir_maxdepth is 2, folder_path_mkdir will be "B/C".
+        folder_path_mkdir = (
+            self.folder_path
+            if not self.export_opts.mkdir_maxdepth
+            else Path(*self.folder_path.parts[-self.export_opts.mkdir_maxdepth :])
+        )
+
+        if self.export_opts.files_mkdir:
+            files_dir = files_dir / folder_path_mkdir
+
+        if isinstance(attachments_folder, Path):
+            assert attachments_dir_path.is_dir()  # noqa: S101 ; caller should have verified!
+            assert attachments_dir_path.is_absolute()  # noqa: S101 ; caller should have verified!
+        elif attachments_folder.upper() == ATTACHMENTS_FOLDER_ROOT:
+            attachments_dir_path = self.export_opts.root_out_dir
+            attachments_mkdir = False
+        elif attachments_folder.upper().startswith(ATTACHMENTS_FOLDER_FILE):  # allow plural "FILES"
+            attachments_dir_path = files_dir
+            attachments_mkdir = False
+        elif not attachments_dir_path.is_absolute():
+            attachments_dir_path = files_dir / safe_file_name(attachments_folder, ATTACHMENTS_DEFAULT_FOLDER)
+            attachments_mkdir = False
+
+        if attachments_mkdir:
+            attachments_dir_path = attachments_dir_path / folder_path_mkdir
+
+        self.export_opts.files_dir = files_dir
+        self.export_opts.attachments_mkdir = attachments_mkdir
+        self.export_opts.attachments_folder = attachments_dir_path
+
+    def update_messages_params(self: Self, params: dict[str, str | int]) -> None:  # noqa: B027
         """Update parameters used in the '/messages' Graph API request.
 
         Args:
@@ -894,6 +1208,6 @@ class OutputWorkerCore(ABC):
 
         return unique_file_path(self.export_opts.files_dir / Path(title + ".tbd"), file_date)
 
-    def last_batch_complete(self: Self) -> int:
+    def finalize_export(self: Self) -> int:
         """Called after the last batch of messages for a folder is complete.."""
         return 0

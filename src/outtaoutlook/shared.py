@@ -40,10 +40,10 @@ class ExportError(Exception):
     """Base class for all export related errors."""
 
 
-class ExportAbortedError(ExportError):
-    """Raised when an export operation is aborted."""
+class ExportCancelledError(ExportError):
+    """Raised when an export operation is cancelled."""
 
-    def __init__(self, message: str = "Export operation aborted due to abort signal.") -> None:
+    def __init__(self, message: str = "Export operation stopped due to cancellation signal.") -> None:
         """Constructor."""
         super().__init__(message)
 
