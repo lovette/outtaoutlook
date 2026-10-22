@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Self
 
 from outtaoutlook.graphapi import GraphMessageT, log_message_notice
 
-from .output import OutputWorkerCore
+from .output_core import OutputWorkerCore
 from .shared import (
     ExportStat,
     exportstat_incr,

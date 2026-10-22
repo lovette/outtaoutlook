@@ -19,7 +19,7 @@ from outtaoutlook.shared import (
     datetime_now,
 )
 
-from .output import OutputWorkerCore
+from .output_core import OutputWorkerCore
 from .shared import (
     ExportOptions,
     ExportStat,

@@ -44,7 +44,7 @@ from .shared import (
 if TYPE_CHECKING:
     from collections.abc import Generator
 
-    from .output import OutputWorkerCore
+    from .output_core import OutputWorkerCore
 
 
 ######################################################################

@@ -17,7 +17,7 @@ from outtaoutlook.shared import (
     logger,
 )
 
-from .output import OutputWorkerCore
+from .output_core import OutputWorkerCore
 from .shared import (
     ExportStat,
     abort_workers_event,

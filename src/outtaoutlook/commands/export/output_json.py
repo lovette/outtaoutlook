@@ -4,7 +4,7 @@ import json
 from datetime import datetime
 from typing import TYPE_CHECKING, Self
 
-from .output import OutputWorkerCore
+from .output_core import OutputWorkerCore
 from .shared import (
     ExportStat,
     exportstat_incr,
