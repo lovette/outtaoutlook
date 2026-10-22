@@ -2,6 +2,7 @@
 
 import base64
 import binascii
+import hashlib
 import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Self
@@ -148,9 +149,12 @@ class OutputWorkerEml(OutputWorkerCore):
 
     def _flush_queue(self) -> int:
 
-        def _batch_request_id(idx: int) -> str:
-            """Outlook message IDs are too long to use as batch request IDs so we use a shorter one."""
-            return f"{self.folder_name}-{self._batch_request_id_start + idx}"
+        def _batch_request_id(message_id: str, idx: int) -> str:  # noqa: ARG001
+            # Outlook message immutable IDs are 68 characters in length.
+            # The Graph API truncates them at some point so we get duplicate key errors.
+            # The short key should be deterministic so cached responses can be correctly matched.
+            sha256_hex = hashlib.sha256(message_id.encode("utf-8")).hexdigest()
+            return sha256_hex[:32]
 
         assert len(self._queued_messages) > 0  # noqa: S101
         assert self.session is not None  # noqa: S101

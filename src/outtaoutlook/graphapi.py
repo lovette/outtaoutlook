@@ -1111,7 +1111,7 @@ def graph_get_resource_batch(  # noqa: PLR0913
     headers: dict[str, Any] | None = None,
     cache_key: dict[str, Any] | None = None,
     sequence: bool = True,
-    short_key_factory: Callable[[int], str] | None = None,
+    short_key_factory: Callable[[str, int], str] | None = None,
 ) -> dict[str, GraphApiReturnT]:
     """Execute a batch of GET request to Microsoft Graph API.
 
@@ -1130,7 +1130,7 @@ def graph_get_resource_batch(  # noqa: PLR0913
         headers (dict, optional): HTTP headers for the GET request. Defaults to None.
         cache_key (dict, optional): Cache key for the batch request. Defaults to requested URLs if not provided.
         sequence (bool, optional): True if individual batched requests should be executed in sequence. Defaults to True.
-        short_key_factory (Callable[[int], str], optional): Factory function to generate short request IDs. Defaults to None.
+        short_key_factory (Callable[[str, int], str], optional): Function to generate short request IDs. Defaults to None.
 
     Returns:
         dict[str, GraphApiReturnT]: Dictionary mapping request IDs to their JSON responses.
@@ -1159,7 +1159,7 @@ def graph_get_resource_batch(  # noqa: PLR0913
         # I can't find an official statement, but experience says Graph API truncates long IDs.
         # As a convenience, we can translate long IDs into shorter batch specific IDs.
         if short_key_factory is not None:
-            short_id = short_key_factory(len(requests) + 1)
+            short_id = short_key_factory(request_id, len(requests) + 1)
             request_id_map[short_id] = request_id
 
         request: dict[str, str | list[str]] = {
@@ -1187,7 +1187,12 @@ def graph_get_resource_batch(  # noqa: PLR0913
     responses = data.get("responses", [])
 
     if request_id_map:
-        return {request_id_map[resp["id"]]: resp for resp in responses}
+        try:
+            return {request_id_map[resp["id"]]: resp for resp in responses}
+        except KeyError:
+            logger.error("KeyError encountered while mapping short request IDs to original request IDs.")
+            raise
+
     return {resp["id"]: resp for resp in responses}
 
 
