@@ -873,18 +873,21 @@ class OutputWorkerCore(ABC):
     def write_output_file(
         self,
         file_path: Path,
-        file_text: str,
+        file_text: str | bytes,
         file_date: datetime | None,
     ) -> None:
         """Write output file and set its modification date.
 
         Args:
             file_path (Path): Output file path.
-            file_text (str): File content.
+            file_text (str | bytes): File content. If str, it will be written as text; if bytes, as binary.
             file_date (datetime | None): Modification date. If None, the file's modification date will not be set.
         """
         if not self.export_opts.dry_run:
-            file_path.write_text(file_text, encoding="utf-8")
+            if isinstance(file_text, str):
+                file_path.write_text(file_text, encoding="utf-8")
+            else:
+                file_path.write_bytes(file_text)
 
             if file_date:
                 os.utime(file_path, (file_date.timestamp(), file_date.timestamp()))

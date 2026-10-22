@@ -197,13 +197,14 @@ class OutputWorkerEml(OutputWorkerCore):
 
             if content:
                 try:
-                    content = base64.b64decode(content).decode("utf-8")
+                    content = base64.b64decode(content)
                 except binascii.Error as err:
                     log_message_notice(
                         item.message,
-                        f"$batch/messages/id/$value: Failed to decode message content: {err}",
+                        f"$batch/messages/id/$value: Failed to b64decode message content: {err}",
                         logging.ERROR,
                     )
+                    content = None
 
             n_exported = self._real_export_message(item, content)
             if n_exported:
@@ -213,12 +214,12 @@ class OutputWorkerEml(OutputWorkerCore):
 
         return n_messages
 
-    def _real_export_message(self: Self, item: MessageQueueItemT, content: str | None) -> int:
+    def _real_export_message(self: Self, item: MessageQueueItemT, content: bytes | None) -> int:
         """Export a message as a raw .eml file.
 
         Args:
             item (MessageQueueItemT): The message queue item containing all necessary information.
-            content (str | None): The raw content of the message, or None if not available.
+            content (bytes | None): The raw content of the message, or None if not available.
 
         Returns:
             int: The number of messages processed. Typically 1, but can be 0 if queued for later and >0 when processed.
@@ -233,17 +234,9 @@ class OutputWorkerEml(OutputWorkerCore):
             return 1
 
         file_date = item.message["messageDateTime"]
-        has_attachments = item.message.get("hasAttachments")
 
-        if not content:
-            if content is None:
-                return _skip_message(ExportStat.STAT_SKIPPED_NO_MESSAGE_BODY, logging.WARNING)
-            if has_attachments and self.export_opts.with_attachments:
-                content = ""  # content will be links to attachments
-            if not has_attachments:
-                return _skip_message(ExportStat.STAT_SKIPPED_NO_MESSAGE_CONTENT_NO_ATTACHMENTS, logging.INFO)
-            if not self.export_opts.with_attachments:
-                return _skip_message(ExportStat.STAT_SKIPPED_NO_MESSAGE_CONTENT_JUST_ATTACHMENTS, logging.INFO)
+        if content is None:
+            return _skip_message(ExportStat.STAT_SKIPPED_NO_MESSAGE_BODY, logging.WARNING)
 
         self.write_output_file(item.file_path, content, file_date)
 

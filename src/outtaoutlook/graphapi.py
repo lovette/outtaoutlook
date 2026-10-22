@@ -436,7 +436,11 @@ def _batch_raise_for_status(  # noqa: C901
         try:
             body = base64.b64decode(body).decode("utf-8")
         except binascii.Error as err:
-            message = f"Unexpected batch request error response body: {body}; {err}"
+            # b64decode failed
+            message = f"Failed to b64decode batch request error response body: {body}; {err}"
+        except UnicodeDecodeError as err:
+            # decode("utf-8") failed
+            message = f"Failed to utf-8 decode batch request error response body: {body}; {err}"
         else:
             json_body = json.loads(body)
 
