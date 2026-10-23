@@ -40,6 +40,8 @@ from .shared import (
 if TYPE_CHECKING:
     from collections.abc import Generator, Sequence
 
+    from rich.table import Column
+
     from .output_core import OutputWorkerCore
 
 
@@ -82,6 +84,36 @@ class RemainingItemsColumn(ProgressColumn):
         remaining = f"{int(task.remaining):,}" if task.remaining is not None else "--"
 
         return Text(f"{remaining}/{total}", style="progress.remaining")
+
+
+class BetterMofNCompleteColumn(ProgressColumn):
+    """Renders completed count/total, e.g. '  10/1000'.
+
+    MofNCompleteColumn doesn't look great when there are multiple tasks all with different totals.
+
+    Args:
+        separator (str, optional): Text to separate completed and total values. Defaults to "/".
+    """
+
+    def __init__(  # noqa: D107
+        self,
+        separator: str = "/",
+        table_column: Column | None = None,
+        *,
+        completed_width: int = 0,
+    ) -> None:
+        self.separator = separator
+        self.completed_width = completed_width
+        super().__init__(table_column=table_column)
+
+    def render(self, task: Task) -> Text:
+        """Show completed/total."""
+        completed = f"{int(task.completed):,}"
+        total = f"{int(task.total):,}" if task.total is not None else "--"
+        return Text(
+            f"{completed:>{self.completed_width}s}{self.separator}{total:{self.completed_width}s}",
+            style="progress.download",
+        )
 
 
 ######################################################################
@@ -248,7 +280,7 @@ def start_workers(
             TextColumn("{task.description}"),
             BarColumn(),
             SpinnerColumn(),
-            RemainingItemsColumn(),  # TextColumn("{task.remaining:g}"),
+            BetterMofNCompleteColumn(completed_width=len("000,000")),  # TextColumn("{task.remaining:g}"),
             TextColumn("{task.fields[status]}"),  # our custom field
         ]
 
