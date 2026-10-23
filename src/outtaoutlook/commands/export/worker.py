@@ -58,6 +58,7 @@ thread_local_data = threading.local()
 thread_id_counter_lock = threading.Lock()
 thread_id_counter = 0
 
+worker_pause_event = threading.Event()
 
 ######################################################################
 # Constants
@@ -221,6 +222,9 @@ def _worker_main(
     # Do this first!
     thread_id = _assign_thread_id()
 
+    # Wait until we are released to start processing.
+    worker_pause_event.wait()
+
     try:
         with sessions.Session() as session:
             ow.export(thread_id, session)
@@ -336,6 +340,12 @@ def start_workers(
         # Start timer now so we can turn off the spinner if export is cancelled.
         for progress_task_id in progress.task_ids:
             progress.start_task(progress_task_id)
+
+        console.file.flush()
+
+        # All the workers are held back until they all start and console output is flushed.
+        # This helps prevent console/log output from interrupting the progress display.
+        worker_pause_event.set()
 
         for future, ow in workers.items():
             # We are looping through workers sequentially instead of using `as_completed`
