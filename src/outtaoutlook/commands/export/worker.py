@@ -27,9 +27,11 @@ from outtaoutlook.shared import (
     logger,
 )
 
+from .output_core import ExportStat
 from .output_eml import OutputWorkerEml
 from .output_html import OutputWorkerHtml
 from .output_json import OutputWorkerJson
+from .output_mbox import OutputWorkerMbox
 from .output_md import OutputWorkerMarkdown
 from .shared import (
     MAX_EXPORT_WORKERS,
@@ -68,6 +70,7 @@ EXPORT_MODULES: dict[OutputFormatChoice, type[OutputWorkerCore]] = {
     OutputFormatChoice.md: OutputWorkerMarkdown,
     OutputFormatChoice.html: OutputWorkerHtml,
     OutputFormatChoice.json: OutputWorkerJson,
+    OutputFormatChoice.mbox: OutputWorkerMbox,
 }
 
 
@@ -165,8 +168,8 @@ def _assign_thread_id() -> int:
     return thread_local_data.thread_id
 
 
-def _print_export_results(ows: Sequence[OutputWorkerCore]) -> None:
-    ow_with_results = [ow for ow in ows if ow.has_results]
+def _print_export_results(ows: Sequence[OutputWorkerCore]) -> None:  # noqa: C901
+    ow_with_results = [ow for ow in ows if ow.has_results or ow.export_result.failed or ow.export_result.cancelled]
     if not ow_with_results:
         return  # nothing to report
 
@@ -177,8 +180,10 @@ def _print_export_results(ows: Sequence[OutputWorkerCore]) -> None:
         console.print()
         console.print(f"[bold]'{ow.folder_path}'[/bold]:")
 
-        if ow.export_result.failed or ow.export_result.cancelled:
+        if ow.export_result.failed:
             console.print("[red]- Export did not complete[/red]")
+        elif ow.export_result.cancelled:
+            console.print("[yellow]- Export was cancelled[/yellow]")
 
         for level, messages in ow.export_result.messages.items():
             for message in messages:
@@ -189,8 +194,9 @@ def _print_export_results(ows: Sequence[OutputWorkerCore]) -> None:
                 else:
                     console.print(f"- {message}")
 
-        if ow.export_stats:
-            for stat, stat_count in ow.export_stats.items():
+        for stat in ExportStat:
+            stat_count = ow.export_stats.get(stat)
+            if stat_count is not None:
                 console.print(f"- {stat}: {stat_count:,}")
 
 

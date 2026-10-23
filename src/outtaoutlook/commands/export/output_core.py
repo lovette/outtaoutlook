@@ -2,6 +2,7 @@
 
 import base64
 import binascii
+import itertools
 import json
 import logging
 import mimetypes
@@ -49,6 +50,8 @@ from .shared import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from rich.progress import Progress, Task, TaskID
 
 
@@ -89,7 +92,8 @@ MESSAGE_DATE_FIELDS = ["createdDateTime", "lastModifiedDateTime", "sentDateTime"
 class ExportStat(StrEnum):
     """Export statistic messages."""
 
-    STAT_FILE_CREATED = "Files created"
+    # Results are output in the order they are defined here.
+    STAT_MESSAGE_EXPORTED = "Messages exported"
     STAT_ATTACHMENT_SAVED = "Attachments saved"
     STAT_SKIPPED_DUPLICATE = "Skipped; Message already exported"
     STAT_SKIPPED_MARKDOWN_CONVERSION_FAILED = "Skipped; Markdown conversion failed"
@@ -161,8 +165,7 @@ class OutputWorkerCore(ABC):
         self.export_stats: ExportStatsT = {}
         self.export_result = ExportResult()
         self.manifest_ids: set[str] = set()
-
-        self.update_export_opts()
+        self.write_messages_status = "writing files"
 
     ######################################################################
     # Helper methods
@@ -614,7 +617,7 @@ class OutputWorkerCore(ABC):
         url: str,
         params: dict[str, str | int] | None,
         batch_limit: int,
-    ) -> tuple[int, int, str | None]:
+    ) -> tuple[int, int, int, str | None]:
         """Export a batch of messages from a specific folder.
 
         Args:
@@ -624,9 +627,12 @@ class OutputWorkerCore(ABC):
             batch_limit (int): The maximum number of messages to export in this batch.
 
         Returns:
-            tuple[int, int, str | None]: [Number of messages exported in this batch (including dups),
+            tuple[int, int, int, str | None]: [
+                Number of messages processed in this batch,
+                Number of duplicate messages in this batch,
                 Number of messages actually written in this batch,
-                Link to next batch of messages or None if there are no more batches]
+                Link to next batch of messages or None if there are no more batches
+                ]
 
         Raises:
             requests.RequestException derived error (e.g. ConnectionError, JSONDecodeError, HTTPError, etc.)
@@ -634,46 +640,52 @@ class OutputWorkerCore(ABC):
         """
         data = first_batch_data or self._list_messages(url, params=params)
 
-        messages = data.get("value", [])
-        next_url = data.get("@odata.nextLink")
+        messages: list[GraphMessageT] = data.get("value", [])
+        next_url: str | None = data.get("@odata.nextLink")
 
-        self.progress_update(status="evaluating", refresh=True)  # don't say writing when we're not writing yet
+        self.progress_update(status=self.write_messages_status, refresh=True)
 
-        n_written_total = 0
-        update_status = True
+        dup_total = 0
+        batch_total = 0
+        written_total = 0
 
-        for message in messages:
+        for message in itertools.islice(messages, batch_limit):
             self.raise_if_cancelled()
 
             if message["id"] not in self.manifest_ids:
-                n_written = self._export_write_message(message)  # will be 0 if queued
+                # n_advance will be:
+                # - 0 if no progress is made (e.g. message queued)
+                # - 1 if a single message is written or skipped (e.g. calendar event)
+                # - 20 if a batch of queued messages is written
+                n_advance = self._export_write_message(message)
+                written_total += n_advance
+
                 self.manifest_ids.add(message["id"])
-                n_written_total += n_written
+
+                # We dont't advance progress for dups because when we want to export 50 messages
+                # and it takes 322 attempts due to duplicates, we show progress like "322/50".
+                # The downside is when there are mostly duplicates, the progress bar doesn't move :/
+                if n_advance:
+                    self.progress_update(advance=n_advance)
             else:
-                n_written = 1  # count processed even if in manifest
+                dup_total += 1
                 self.increxportstat(ExportStat.STAT_SKIPPED_DUPLICATE)
 
-            if n_written_total > 0 and update_status:
-                self.progress_update(status="writing files", refresh=True)
-                update_status = False
+            batch_total += 1
 
-            if n_written:
-                self.progress_update(advance=n_written)
+        return batch_total, dup_total, written_total, next_url
 
-            batch_limit -= 1
-            if batch_limit <= 0:
-                break
-
-        return len(messages), n_written_total, next_url
-
-    def emit_log(self, errmsg: str, level: int = logging.INFO) -> None:
-        """Emit a log message for the current folder.
+    def emit_log(self, errmsg: str | Sequence[str | None], level: int = logging.INFO) -> None:
+        """Emit a log message related to the current folder.
 
         Args:
-            errmsg (str): The error message to log.
+            errmsg (str | Sequence[str | None]): The error message to log or a sequence of error messages to join.
             level (int, optional): The logging level. Defaults to logging.INFO.
         """
-        logger.log(level, 'Folder("%s"): %s', self.folder_path, errmsg)
+        if not isinstance(errmsg, str):
+            errmsg = " ".join(filter(None, errmsg)).strip()  # join non-None parts into a string
+        if errmsg:
+            logger.log(level, 'folder("%s"): %s', self.folder_path, errmsg)
 
     def set_failed(self, reason: str, *, raise_now: bool = False) -> None:
         """Mark the export as failed and update progress bar task status.
@@ -685,7 +697,10 @@ class OutputWorkerCore(ABC):
             raise_now (bool, optional): True to raise ExportCancelledError immediately. Defaults to False.
         """
         reason = f"Export failed: {reason}"
-        self.emit_log(reason, logging.ERROR)
+        self.emit_log(reason, logging.DEBUG)
+
+        # Show user in result summary
+        self.export_result.add_message(reason)
 
         self.export_result.failed = True
         self.progress_update(status="failed")
@@ -830,13 +845,19 @@ class OutputWorkerCore(ABC):
             return None
         return self.export_opts.manifest_dir / get_hash_filename(self.folder_id, "export_manifest", ".json")
 
-    def _read_manifest(self) -> None:
+    def _read_manifest(self) -> dict[str, str] | None:
         """Read export manifest file if using a manifest."""
-        manifest_file_path = self.manifest_path
-        if manifest_file_path and manifest_file_path.is_file():
-            self.emit_log(f"Loading export manifest: '{manifest_file_path}'")
-            manifest_data = json.loads(manifest_file_path.read_text())
+        manifest_data = None
+
+        if self.manifest_path and self.manifest_path.is_file():
+            manifest_data = json.loads(self.manifest_path.read_text())
             self.manifest_ids = set(manifest_data.get("messageImmutableIds", []))
+            self.emit_log(
+                f"Read {len(self.manifest_ids):,} message IDs from manifest: '{self.manifest_path}'",
+                logging.DEBUG,
+            )
+
+        return manifest_data
 
     def _write_manifest(self, *, emitlog: bool = False) -> None:
         """Write export manifest file if using a manifest.
@@ -844,14 +865,15 @@ class OutputWorkerCore(ABC):
         Args:
             emitlog (bool, optional): Whether to emit a log message after writing the manifest. Defaults to False.
         """
-        manifest_file_path = self.manifest_path
-        if manifest_file_path:
-            manifest_file_path.write_text(
+        if self.manifest_path and self.manifest_ids:
+            self.manifest_path.write_text(
                 json.dumps(
                     {
                         "date": datetime_now().isoformat(),
                         "folderId": self.folder_id,
                         "folderPath": self.folder_path,
+                        "filterQuery": self.export_opts.filter_query,
+                        "searchQuery": self.export_opts.search_query,
                         "messageImmutableIds": list(self.manifest_ids),
                     },
                     default=json_serializer,
@@ -859,7 +881,10 @@ class OutputWorkerCore(ABC):
             )
 
             if emitlog:
-                self.emit_log(f"Wrote export manifest: '{manifest_file_path}'")
+                self.emit_log(
+                    f"Wrote {len(self.manifest_ids):,} message IDs to manifest: '{self.manifest_path}'",
+                    logging.DEBUG,
+                )
 
     def increxportstat(self, stat: ExportStat, incr: int = 1) -> None:
         """Increment specified export stat.
@@ -897,7 +922,10 @@ class OutputWorkerCore(ABC):
             self.emit_log(f"Wrote file to '{file_path.name}' (dry run)", logging.DEBUG)
 
     def prepare_export(self) -> None:
-        """Prepare to export messages."""
+        """Prepare to export messages.
+
+        The default implementation creates the files directory.
+        """
         self.emit_log(f"Saving files to '{self.export_opts.files_dir}'")
         self._mkdir(self.export_opts.files_dir, "files", parents=self.export_opts.files_mkdir)
 
@@ -938,6 +966,101 @@ class OutputWorkerCore(ABC):
             refresh=refresh,
             **kwargs,
         )
+
+    def export_loop(
+        self,
+        first_batch_data: GraphApiReturnT | None,
+        export_limit: int,
+        params: dict[str, str | int] | None,
+    ) -> None:
+        """Internal loop for exporting messages.
+
+        All messages are processed in this loop (which includes `finalize_export` at the end).
+
+        Args:
+            first_batch_data (GraphApiReturnT | None): First batch of messages.
+            export_limit (int): Maximum number of messages to export.
+            params (dict[str, str | int] | None): Parameters for the listing messages.
+
+        Raises:
+            ExportError if an export error occurred.
+            requests.RequestException derived error (e.g. ConnectionError, JSONDecodeError, HTTPError, etc.)
+            OSError derived error (e.g. file system errors, permission errors, etc.)
+        """
+        assert params is not None  # noqa: S101
+
+        next_url = "..."  # ignored when `first_batch_data` is set
+        n_batch = 0
+        export_total = 0
+        dupes_total = 0
+        batch_size = int(params.get("$top", 0)) or export_limit
+
+        self.emit_log(f"Fetching {batch_size} messages at a time", logging.DEBUG)
+
+        while next_url is not None and export_total < export_limit:
+            self.raise_if_cancelled()
+
+            n_batch += 1
+
+            batch_total, batch_dups, batch_written, next_url = self._export_folder_batch(
+                first_batch_data,
+                next_url,
+                params,
+                min(batch_size, export_limit - export_total),
+            )
+
+            self.emit_log(
+                [
+                    f"Batch #{n_batch}:",
+                    f"{batch_total:,} messages,",
+                    f"{batch_dups:,} duplicates,",
+                    f"{batch_written:,} written",
+                ],
+                logging.DEBUG,
+            )
+
+            # Doing this on every batch is inefficient for large folders but
+            # ensures the manifest is mostly up-to-date if a truly fatal error occurs.
+            if batch_written:
+                self._write_manifest()
+
+            export_total += batch_total
+            dupes_total += batch_dups
+            params = None  # included in 'nextLink' automatically
+            first_batch_data = None
+
+        # Finish up any messages that may have been queued.
+        n_written = self.finalize_export()
+
+        self.emit_log(
+            [
+                "Export summary:",
+                f"{n_batch} batches,",
+                f"{export_total:,} messages,",
+                f"{dupes_total:,} duplicates",
+            ],
+            logging.DEBUG,
+        )
+
+        # Update the progress to indicate that the export is complete.
+        # We're not using 'advance=n_written' because I like the progress bar to be 100%
+        # even when a lot of the messages were duplicates (previously exported.)
+        # Otherwise, when 222 of 322 messages are exported with 100 duplicates,
+        # the progress bar stops at 222/322 :/
+        self.progress_update(completed=self.progress_task.total, status="done")
+
+        # The manifest isn't final until after `finalize_export`!
+        if n_written:
+            self._write_manifest(emitlog=True)
+
+    @property
+    def exported_message_count(self) -> int:
+        """Returns count of non-duplicate messages exported.
+
+        Returns:
+            int
+        """
+        return self.export_stats.get(ExportStat.STAT_MESSAGE_EXPORTED, 0)
 
     ######################################################################
     # Abstract methods
@@ -989,6 +1112,8 @@ class OutputWorkerCore(ABC):
         self.thread_id = thread_id
         self.session = session
 
+        self.update_export_opts()
+
         # Wait for the first thread/worker to get its first batch of messages.
         # This allows the first worker to encounter any issues with
         # the Graph API before other workers proceed and encounter the same.
@@ -1008,40 +1133,52 @@ class OutputWorkerCore(ABC):
 
         self.progress_update(status="evaluating", refresh=True)
 
-        self._read_manifest()
+        # Ignore manifest when doing filter test
+        manifest_data = self._read_manifest() if not self.export_opts.filter_test else None
 
-        export_limit = self.export_opts.files_limit
-        exported_total_count = len(self.manifest_ids)
+        export_limit = self.export_opts.files_limit  # 0=no limit
+        manifest_id_count = len(self.manifest_ids)
 
         # https://learn.microsoft.com/en-us/graph/query-parameters
         params: dict[str, str | int] | None = {
             "$count": "true",
+            "$top": min(export_limit, self.export_opts.batch_size) or self.export_opts.batch_size,
         }
 
         if self.export_opts.filter_query:
-            params["$top"] = 1  # We're only interested in the message $count
             params["$filter"] = self.export_opts.filter_query
-            exported_total_count = 0  # Manifest can be used to find dups but we but can't "skip" ahead
+            manifest_id_count = 0  # Manifest can be used to find dups but we but can't "skip" ahead
 
         elif self.export_opts.search_query:
-            params["$top"] = 1  # We're only interested in the message $count
             params["$search"] = self.export_opts.search_query
-            exported_total_count = 0  # Manifest can be used to find dups but we but can't "skip" ahead
+            manifest_id_count = 0  # Manifest can be used to find dups but we but can't "skip" ahead
 
         else:
             # The Graph API imposes rules when using $orderby and $filter together.
             # $search and $orderby cannot be used together.
             # Orderby multiple fields so order is more deterministic.
-            params["$top"] = self.export_opts.batch_size
             params["$orderby"] = "lastModifiedDateTime,internetMessageId,subject"
 
-        if exported_total_count and not self.export_opts.filter_test:
-            params["$skip"] = exported_total_count  # skip already exported messages
+        if (
+            manifest_data
+            and manifest_id_count
+            and self.export_opts.filter_query == manifest_data["filterQuery"]
+            and self.export_opts.search_query == manifest_data["searchQuery"]
+        ):
+            # We can skip previously exported messages when filtering (or not)
+            # is kept consistent between runs! Otherwise, messages that should
+            # be included are certainly being skipped.
+            params["$skip"] = manifest_id_count
 
         self.update_messages_params(params)
 
         if self.export_opts.filter_test:
-            params["$select"] = "id"  # Might as well make the response shorter; this *overrides* everyone!
+            # This *overrides* everyone!
+            params["$top"] = 1  # We're only interested in the message $count
+            params["$select"] = "id"  # Might as well make the response shorter
+
+        # Sort to ensure consistent ordering for caching
+        params = dict(sorted(params.items()))
 
         # https://learn.microsoft.com/en-us/graph/api/resources/mail-api-overview
         # https://learn.microsoft.com/en-us/graph/api/message-get
@@ -1053,14 +1190,14 @@ class OutputWorkerCore(ABC):
         first_batch_messages = first_batch_data.get("value", [])
 
         # I'm guessing '@odata.count' is not provided when search results are less than '$top'.
-        export_message_count: int = first_batch_data.get("@odata.count") or len(first_batch_messages)
+        messages_count: int = first_batch_data.get("@odata.count") or len(first_batch_messages)
 
         if self.export_opts.filter_test:
             # Report the filtered message count next to task progress.
-            self.progress_update(total=1, completed=1, status=f"{export_message_count} messages")
+            self.progress_update(total=1, completed=1, status=f"{messages_count} messages")
             return
 
-        if not export_message_count:
+        if not messages_count:
             if self.export_opts.filter_query:
                 msg, level = "No messages match 'filter' criteria", logging.INFO
             elif self.export_opts.search_query:
@@ -1072,85 +1209,56 @@ class OutputWorkerCore(ABC):
 
             return
 
-        export_limit = min(export_limit, export_message_count) if export_limit else export_message_count
+        # When filtering or searching, consider all messages remaining.
+        messages_remaining = (
+            messages_count
+            if self.export_opts.filter_query or self.export_opts.search_query
+            else max(0, messages_count - manifest_id_count)
+        )
 
-        status_message = ["Exporting"]
+        if not messages_remaining:
+            self.emit_log("No remaining messages", logging.DEBUG)  # log stream
+            self.export_result.add_message("All messages have been exported.")  # reported in results
+            self.progress_update(total=0, completed=0, status="done")
+            return
 
-        if export_limit == folder_message_count:
-            status_message.append(f"all {folder_message_count}")
-        elif self.export_opts.filter_query or self.export_opts.search_query:
-            status_message.append(f"{export_message_count} (filtered) of {folder_message_count}")
-        else:
-            status_message.append(f"{export_limit} of {export_message_count}")
+        export_limit = min(export_limit, messages_remaining) if export_limit else messages_remaining
 
-        status_message.append("messages")
+        self.progress_update(total=export_limit, completed=0)
 
-        if self.manifest_path:
-            status_message.append("(skipping dups)")
-        if self.export_opts.dry_run:
-            status_message.append("(dry run)")
-
-        self.emit_log(" ".join(status_message))
-
-        self.progress_update(total=min(export_limit, export_message_count), completed=exported_total_count)
-
-        # Start with stats that will always be output
-        self.increxportstat(ExportStat.STAT_FILE_CREATED, incr=0)
-        if self.export_opts.with_attachments:
-            self.increxportstat(ExportStat.STAT_ATTACHMENT_SAVED, incr=0)
-        if exported_total_count:
-            self.increxportstat(ExportStat.STAT_SKIPPED_DUPLICATE, incr=exported_total_count)
+        self.emit_log(
+            [
+                "Exporting",
+                f"all {folder_message_count:,}" if export_limit == folder_message_count else None,
+                f"{export_limit:,} of {messages_count:,}" if export_limit < folder_message_count else None,
+                "(filtered)" if self.export_opts.filter_query or self.export_opts.search_query else None,
+                "messages",
+                "(skipping dups)" if self.manifest_path else None,
+                "(dry run)" if self.export_opts.dry_run else None,
+            ],
+        )
 
         self.prepare_export()
 
-        n_written_total = 0
+        try:
+            self.export_loop(
+                first_batch_data,
+                export_limit,
+                params,
+            )
+        except requests.RequestException, ExportError, ValueError, OSError:
+            # Try to keep the manifest up-to-date even if an error occurs.
+            self._write_manifest()
+            raise
 
-        while next_url is not None and exported_total_count < export_limit:
-            self.raise_if_cancelled()
-
-            n_written = 0
-
-            try:
-                batch_total, n_written, next_url = self._export_folder_batch(
-                    first_batch_data,
-                    next_url,  # ignored when `first_batch_data` is set
-                    params,
-                    min(self.export_opts.batch_size, export_limit - exported_total_count),
-                )
-
-            except requests.RequestException, ExportError, ValueError, OSError:
-                # Try to keep the manifest up-to-date even if an error occurs.
-                self._write_manifest()
-                raise
-            else:
-                # Doing this on every batch is inefficient for large folders but
-                # ensures the manifest is mostly up-to-date if a truly fatal error occurs.
-                if n_written:
-                    self._write_manifest()
-
-            exported_total_count += batch_total
-            n_written_total += n_written
-            params = None  # included in 'nextLink' automatically
-            first_batch_data = None
-
-        # Finish up any messages that may have been queued.
-        n_written = self.finalize_export()
-        n_written_total += n_written
-
-        # The manifest isn't final until after `finalize_export`!
-        if n_written:
-            self._write_manifest(emitlog=True)
-
-        self.progress_update(advance=n_written, status="done")
-
-        if not n_written_total:
-            self.emit_log("No files were written during the export.")
+        if not self.exported_message_count:
+            self.emit_log("No messages were exported.")
 
     ######################################################################
     # Common overridden methods
 
     def update_export_opts(self) -> None:
-        """Set and optionally update export options for messages in the current folder."""
+        """Set and optionally update export options."""
         files_dir = self.export_opts.files_dir
         attachments_folder = self.export_opts.attachments_folder
         attachments_dir_path = Path(attachments_folder)  # assume it's an absolute path to start
@@ -1194,6 +1302,7 @@ class OutputWorkerCore(ABC):
             params (dict[str, str | int]): Dictionary of parameters to update.
         """
 
+    @abstractmethod
     def get_file_path(
         self: Self,
         message: GraphMessageT,

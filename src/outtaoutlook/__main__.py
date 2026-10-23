@@ -42,7 +42,7 @@ VERBOSE_LOGGING_FORMATS = {
     logging.ERROR: "[{levelname}] {message}",
     logging.WARNING: "[{levelname}] {message}",
     logging.INFO: "[{levelname}] {message}",
-    logging.DEBUG: "[{asctime}.{msecs:03.0f} {levelname} {threadName}] {message}",
+    logging.DEBUG: "[{asctime}.{msecs:03.0f} {levelname:5} {threadName:>10}] {message}",
 }
 
 LOGGING_DATE_FORMAT = "%H:%M:%S"

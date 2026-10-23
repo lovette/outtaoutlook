@@ -535,6 +535,6 @@ class OutputWorkerMarkdown(OutputWorkerCore):
 
         self.write_output_file(file_path, file_text, file_date)
 
-        self.increxportstat(ExportStat.STAT_FILE_CREATED)
+        self.increxportstat(ExportStat.STAT_MESSAGE_EXPORTED)
 
         return 1

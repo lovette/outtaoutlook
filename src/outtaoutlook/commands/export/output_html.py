@@ -108,6 +108,6 @@ class OutputWorkerHtml(OutputWorkerCore):
 
         self.write_output_file(file_path, body_content, file_date)
 
-        self.increxportstat(ExportStat.STAT_FILE_CREATED)
+        self.increxportstat(ExportStat.STAT_MESSAGE_EXPORTED)
 
         return 1

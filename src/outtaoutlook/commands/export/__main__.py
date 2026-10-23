@@ -690,8 +690,6 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
 
         console.print(" ".join(msg))
 
-        logger.debug("Querying Graph API for %d messages at a time", batch_size)
-
     if filter_query:
         console.print(f"Filter criteria: {filter_query}")
     else:

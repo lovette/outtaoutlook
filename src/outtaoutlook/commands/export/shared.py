@@ -30,6 +30,7 @@ class OutputFormatChoice(StrEnum):
     eml = "eml"
     html = "html"
     json = "json"
+    mbox = "mbox"
     md = "md"
 
 
