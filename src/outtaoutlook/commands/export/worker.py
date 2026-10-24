@@ -263,13 +263,13 @@ def start_workers(
     export_opts: ExportOptions,
     max_workers: int | None,
 ) -> None:
-    """Export a list of folders, each in its own thread.
+    """Export a list of folders, each in its own worker.
 
     Args:
         folders (list[GraphFolderT]): List of folder objects.
         graph_config (GraphApiConfig): Graph API configuration.
         export_opts (ExportOptions): Options for exporting messages.
-        max_workers (int or None): Maximum size of thread pool or None to decide based on hardware.
+        max_workers (int or None): Maximum size of worker pool or None to decide based on hardware.
     """
 
     # Keyword arguments to `_worker_main`.

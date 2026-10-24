@@ -79,7 +79,7 @@ export:
   attachments_mkdir: true
   maxdepth: 5
   mkdir_maxdepth: 5
-  max_threads: 3
+  max_workers: 3
 
   filter:
     - "lastModifiedDateTime ge 2026-01-01"

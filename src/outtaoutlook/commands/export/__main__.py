@@ -539,13 +539,13 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
             help="Number of messages to to fetch in each Graph API request.",
         ),
     ] = GRAPH_API_BATCH_MAX,
-    max_threads: Annotated[
+    max_workers: Annotated[
         int | None,
         typer.Option(
             min=1,
             max=MAX_EXPORT_WORKERS,
             rich_help_panel="Other options",
-            help="Maximum size of thread pool.",
+            help="Maximum size of worker pool.",
         ),
     ] = None,
     dry_run: Annotated[  # noqa: FBT002
@@ -647,11 +647,11 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         err_console.print("No folders selected to export.")
         raise typer.Exit(code=1)
 
-    # We don't need more threads than we have folders.
-    if max_threads:
-        max_threads = min(max_threads, len(folders))
+    # We don't need more workers than we have folders.
+    if max_workers:
+        max_workers = min(max_workers, len(folders))
     elif len(folders) < MAX_EXPORT_WORKERS:
-        max_threads = len(folders)
+        max_workers = len(folders)
 
     export_opts = ExportOptions(
         out_format=out_format,
@@ -674,7 +674,7 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         search_query=search_query,
         root_out_dir=out_dir,
         with_attachments=with_attachments,
-        max_workers=max_threads or MAX_EXPORT_WORKERS,
+        max_workers=max_workers or MAX_EXPORT_WORKERS,
     )
 
     if filter_test:
@@ -702,4 +702,4 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
 
     console.print()
 
-    start_workers(folders, graph_config, export_opts, max_threads)
+    start_workers(folders, graph_config, export_opts, max_workers)
