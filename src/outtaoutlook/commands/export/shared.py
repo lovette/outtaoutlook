@@ -31,6 +31,7 @@ class OutputFormatChoice(StrEnum):
     html = "html"
     json = "json"
     mbox = "mbox"
+    maildir = "maildir"
     md = "md"
 
 

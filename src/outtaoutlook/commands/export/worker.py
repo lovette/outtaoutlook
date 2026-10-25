@@ -31,6 +31,7 @@ from .output_core import ExportStat
 from .output_eml import OutputWorkerEml
 from .output_html import OutputWorkerHtml
 from .output_json import OutputWorkerJson
+from .output_maildir import OutputWorkerMaildir
 from .output_mbox import OutputWorkerMbox
 from .output_md import OutputWorkerMarkdown
 from .shared import (
@@ -72,6 +73,7 @@ EXPORT_MODULES: dict[OutputFormatChoice, type[OutputWorkerCore]] = {
     OutputFormatChoice.html: OutputWorkerHtml,
     OutputFormatChoice.json: OutputWorkerJson,
     OutputFormatChoice.mbox: OutputWorkerMbox,
+    OutputFormatChoice.maildir: OutputWorkerMaildir,
 }
 
 

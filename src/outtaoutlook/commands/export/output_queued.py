@@ -2,7 +2,6 @@
 
 import base64
 import binascii
-import hashlib
 import logging
 from abc import abstractmethod
 from dataclasses import dataclass
@@ -118,8 +117,7 @@ class OutputWorkerQueued(OutputWorkerCore):
             # Outlook message immutable IDs are 68 characters in length.
             # The Graph API truncates them at some point so we get duplicate key errors.
             # The short key should be deterministic so cached responses can be correctly matched.
-            sha256_hex = hashlib.sha256(message_id.encode("utf-8")).hexdigest()
-            return sha256_hex[:32]
+            return self._queued_messages[message_id].message["ooid"]
 
         assert len(self._queued_messages) > 0  # noqa: S101
         assert self.session is not None  # noqa: S101

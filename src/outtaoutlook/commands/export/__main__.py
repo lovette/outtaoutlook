@@ -114,22 +114,34 @@ def _opt_attachments_folder_callback(attachments_folder: str) -> str:
     raise typer.BadParameter(errmsg)
 
 
-def _opt_root_out_dir_callback(root_out_dir: str) -> str:
+def _opt_root_out_dir_callback(ctx: typer.Context, root_out_dir: str) -> str:
     """Handle `--outdir` command option.
 
     Args:
+        ctx (typer.Context): Typer context object.
         root_out_dir (str): Command line option value.
 
     Returns:
         str: Special keyword, valid folder name or absolute path.
     """
+    out_format = ctx.params.get("out_format")
+
     if not root_out_dir:
         errmsg = "A path to an existing directory is required."
         raise typer.BadParameter(errmsg)
 
     # Absolute or relative path to a directory optionally with ~ or $ENV variables.
     root_out_dir_path = path_with_vars(root_out_dir)
-    if not root_out_dir_path.is_dir():
+
+    if out_format == OutputFormatChoice.maildir:
+        if root_out_dir_path.exists():
+            # Validate Maildir subdirectory structure.
+            for subdir in ("cur", "new", "tmp"):
+                if not (root_out_dir_path / subdir).is_dir():
+                    errmsg = f"Directory '{root_out_dir}' exists but is not a Maildir: '/{subdir}' not found."
+                    raise typer.BadParameter(errmsg)
+
+    elif not root_out_dir_path.is_dir():
         errmsg = f"Directory '{root_out_dir}' does not exist."
         raise typer.BadParameter(errmsg)
 
@@ -341,6 +353,7 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
             "-F",
             help="Output file format.",
             rich_help_panel="Output",
+            is_eager=True,  # we need to reference in `_opt_root_out_dir_callback`
         ),
     ] = OutputFormatChoice.md,
     folder: Annotated[

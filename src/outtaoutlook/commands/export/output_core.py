@@ -2,6 +2,7 @@
 
 import base64
 import binascii
+import hashlib
 import itertools
 import json
 import logging
@@ -584,6 +585,7 @@ class OutputWorkerCore(ABC):
         message["subject"] = subject
         message["fileTitle"] = title  # custom property
         message["messageDateTime"] = file_date  # custom property
+        message["ooid"] = hashlib.sha256(message_id.encode()).hexdigest()[:32]  # custom property
 
         if is_calendar_related:
             # Calendar requests and responses are skipped
@@ -695,6 +697,9 @@ class OutputWorkerCore(ABC):
         Args:
             reason (str): The reason for the failure.
             raise_now (bool, optional): True to raise ExportCancelledError immediately. Defaults to False.
+
+        Raises:
+            ExportCancelledError: If `raise_now` is True.
         """
         reason = f"Export failed: {reason}"
         self.emit_log(reason, logging.DEBUG)
@@ -714,6 +719,9 @@ class OutputWorkerCore(ABC):
         Args:
             reason (str): The reason for the cancellation.
             raise_now (bool, optional): True to raise ExportCancelledError immediately. Defaults to False.
+
+        Raises:
+            ExportCancelledError: If `raise_now` is True.
         """
         reason = f"Export cancelled: {reason}"
         self.emit_log(reason, logging.DEBUG)
