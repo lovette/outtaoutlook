@@ -138,7 +138,7 @@ def get_hash_filename(content: str, prefix: str, suffix: str) -> Path:
         Path
     """
     # Truncating to 32 characters gives us a shorter filename with negligible collision risk.
-    full_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    full_hash = hashlib.sha256(content.encode()).hexdigest()
     short_hash = full_hash[:32]
     return Path(f"{prefix}_{short_hash}{suffix}")
 

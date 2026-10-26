@@ -281,7 +281,7 @@ def _get_cache_file_path_and_header(
     }
 
     if cache_key:
-        cache_json_header["@etag"] = hashlib.sha256(json.dumps(cache_key, sort_keys=True).encode("utf-8")).hexdigest()
+        cache_json_header["@etag"] = hashlib.sha256(json.dumps(cache_key, sort_keys=True).encode()).hexdigest()
 
     cache_file_key = json.dumps(cache_json_header, sort_keys=True)  # sort to keep deterministic
     cache_file_name = get_hash_filename(cache_file_key, "graph_api", ".json")
