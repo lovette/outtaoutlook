@@ -1,16 +1,16 @@
 """Export messages as raw .eml files."""
 
-import logging
 from typing import TYPE_CHECKING, Self
-
-from outtaoutlook.graphapi import GraphMessageT, log_message_notice
 
 from .output_core import ExportStat
 from .output_queued import OutputWorkerQueued
 from .shared import DEFAULT_SELECT_MESSAGE_FIELDS
 
 if TYPE_CHECKING:
+    import mailbox
     from pathlib import Path
+
+    from outtaoutlook.graphapi import GraphMessageT
 
 
 ######################################################################
@@ -68,17 +68,15 @@ class OutputWorkerEml(OutputWorkerQueued):
     def write_queued_message(
         self: Self,
         message: GraphMessageT,
+        mb_message: mailbox.Message,
         file_path: Path,
-        attachment_paths: list[Path] | None,  # noqa: ARG002
-        content: bytes | None,
     ) -> int:
         """Export a message as a raw .eml file.
 
         Args:
             message (GraphMessageT): The message.
+            mb_message (mailbox.Message): The mailbox message object.
             file_path (Path): The path to the output file.
-            attachment_paths (list[Path] | None): List of paths to attachments, or None if there are no attachments.
-            content (bytes | None): The raw content of the message, or None if not available.
 
         Returns:
             int: The number of messages processed. Typically 1, but can be 0 if queued for later and >0 when processed.
@@ -86,18 +84,7 @@ class OutputWorkerEml(OutputWorkerQueued):
         Raises:
             OSError derived error (e.g. file system errors, permission errors, etc.)
         """
-
-        def _skip_message(skip_reason: ExportStat, level: int) -> int:
-            self.export_stats.incr(skip_reason)
-            log_message_notice(message, skip_reason.value, level)
-            return 1
-
         file_date = message["messageDateTime"]
-
-        if content is None:
-            return _skip_message(ExportStat.STAT_SKIPPED_NO_MESSAGE_BODY, logging.WARNING)
-
-        mb_message = self.get_mailbox_message(message, content)
 
         self.write_output_file(file_path, mb_message.as_bytes(), file_date)
 

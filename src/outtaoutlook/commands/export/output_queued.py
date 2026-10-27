@@ -15,9 +15,10 @@ from outtaoutlook.graphapi import (
 )
 from outtaoutlook.shared import VERBOSE_LEVEL_MORE
 
-from .output_core import OutputWorkerCore
+from .output_core import ExportStat, OutputWorkerCore
 
 if TYPE_CHECKING:
+    import mailbox
     from pathlib import Path
 
 ######################################################################
@@ -120,6 +121,11 @@ class OutputWorkerQueued(OutputWorkerCore):
             # The short key should be deterministic so cached responses can be correctly matched.
             return self._queued_messages[message_id].message["ooid"]
 
+        def _skip_message(message: GraphMessageT, skip_reason: ExportStat, level: int) -> int:
+            self.export_stats.incr(skip_reason)
+            log_message_notice(message, skip_reason.value, level)
+            return 1
+
         assert len(self._queued_messages) > 0  # noqa: S101
         assert self.session is not None  # noqa: S101
 
@@ -178,12 +184,14 @@ class OutputWorkerQueued(OutputWorkerCore):
                     )
                     content = None
 
-            n_exported = self.write_queued_message(
-                item.message,
-                item.file_path,
-                item.attachment_paths,
-                content,
-            )
+            if content:
+                n_exported = self.write_queued_message(
+                    item.message,
+                    self.get_mailbox_message(item.message, content),
+                    item.file_path,
+                )
+            else:
+                n_exported = _skip_message(item.message, ExportStat.STAT_SKIPPED_NO_MESSAGE_BODY, logging.WARNING)
 
             if n_exported:
                 self.manifest_ids.add(item.message["id"])
@@ -197,17 +205,15 @@ class OutputWorkerQueued(OutputWorkerCore):
     def write_queued_message(
         self: Self,
         message: GraphMessageT,
+        mb_message: mailbox.Message,
         file_path: Path,
-        attachment_paths: list[Path] | None,
-        content: bytes | None,
     ) -> int:
-        """Export a message as a file.
+        """Export a message to a file.
 
         Args:
             message (GraphMessageT): The message.
+            mb_message (mailbox.Message): The mailbox message object.
             file_path (Path): The path to the output file.
-            attachment_paths (list[Path] | None): List of paths to attachments, or None if there are no attachments.
-            content (bytes | None): The raw content of the message, or None if not available.
 
         Returns:
             int: The number of messages processed. Typically 1, but can be 0 if queued for later and >0 when processed.

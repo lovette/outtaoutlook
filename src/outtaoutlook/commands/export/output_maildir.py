@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Self
 
 from outtaoutlook.commands.export.shared import DEFAULT_SELECT_MESSAGE_FIELDS
-from outtaoutlook.graphapi import GraphMessageT, log_message_notice
 from outtaoutlook.shared import VERBOSE_LEVEL_MORE, logger, safe_file_name
 
 from .output_core import ExportStat
@@ -18,6 +17,8 @@ from .output_queued import OutputWorkerQueued
 
 if TYPE_CHECKING:
     from datetime import datetime
+
+    from outtaoutlook.graphapi import GraphMessageT
 
 ######################################################################
 # Constants
@@ -352,17 +353,15 @@ class OutputWorkerMaildir(OutputWorkerQueued):
     def write_queued_message(
         self: Self,
         message: GraphMessageT,
+        mb_message: mailbox.Message,
         file_path: Path,  # noqa: ARG002
-        attachment_paths: list[Path] | None,  # noqa: ARG002
-        content: bytes | None,
     ) -> int:
         """Export a message to a Maildir.
 
         Args:
             message (GraphMessageT): The message.
+            mb_message (mailbox.Message): The mailbox message object.
             file_path (Path): The path to the output file.
-            attachment_paths (list[Path] | None): List of paths to attachments, or None if there are no attachments.
-            content (bytes | None): The raw content of the message, or None if not available.
 
         Returns:
             int: The number of messages processed. Typically 1, but can be 0 if queued for later and >0 when processed.
@@ -370,25 +369,14 @@ class OutputWorkerMaildir(OutputWorkerQueued):
         Raises:
             OSError derived error (e.g. file system errors, permission errors, etc.)
         """
-
-        def _skip_message(skip_reason: ExportStat, level: int) -> int:
-            self.export_stats.incr(skip_reason)
-            log_message_notice(message, skip_reason.value, level)
-            return 1
-
         if self.maildir is None:
             msg = "Failed to write message to Maildir: .maildir is not initialized"
             raise ValueError(msg)
 
-        if content is None:
-            return _skip_message(ExportStat.STAT_SKIPPED_NO_MESSAGE_BODY, logging.WARNING)
-
         file_date = message["messageDateTime"]
 
-        md_message = self.get_mailbox_message(message, content)
-
         try:
-            self.maildir.add(md_message, file_date, mdid=message["ooid"])
+            self.maildir.add(mb_message, file_date, mdid=message["ooid"])
         except mailbox.ExternalClashError:
             errmsg = f"Message already exists in Maildir: {message['ooid']}: '{message['subject']}'"
             self.emit_log(errmsg, logging.WARNING)
