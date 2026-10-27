@@ -36,6 +36,7 @@ SELECT_MESSAGE_FIELDS = ",".join(
     ),
 )
 
+ALL_MAIL_MBOX = "All Mail"
 
 ######################################################################
 # MboxWrapper class
@@ -170,21 +171,27 @@ class OutputWorkerMbox(OutputWorkerQueued):
 
         mbox_dir = self.export_opts.root_out_dir
 
-        if self.export_opts.files_mkdir and len(self.folder_path.parts) > 1:
-            # Determine the folder path to use when creating subdirectories for files and attachments.
-            # For example, if path is "A/B/C" and mkdir_maxdepth is 2, folder_path_mkdir will be "B/C".
-            folder_path_mkdir = (
-                self.folder_path
-                if not self.export_opts.mkdir_maxdepth
-                else Path(*self.folder_path.parts[-self.export_opts.mkdir_maxdepth :])
-            )
+        if self.export_opts.files_mkdir:
+            if len(self.folder_path.parts) > 1:
+                # Determine the folder path to use when creating subdirectories for files and attachments.
+                # For example, if path is "A/B/C" and mkdir_maxdepth is 2, folder_path_mkdir will be "B/C".
+                folder_path_mkdir = (
+                    self.folder_path
+                    if not self.export_opts.mkdir_maxdepth
+                    else Path(*self.folder_path.parts[-self.export_opts.mkdir_maxdepth :])
+                )
 
-            if len(folder_path_mkdir.parts) > 1:
-                mbox_dir = mbox_dir / folder_path_mkdir.parent
+                if len(folder_path_mkdir.parts) > 1:
+                    mbox_dir = mbox_dir / folder_path_mkdir.parent
 
-        # We do not create a unique file name so messages are appended to the same mbox file.
-        mbox_name = safe_file_name(self.folder_name, TITLE_UNTITLED) + ".mbox"
-        self.mbox_path = mbox_dir / mbox_name
+            # We do not create a unique file name so messages are appended to the same mbox file.
+            mbox_name = safe_file_name(self.folder_name, TITLE_UNTITLED)
+        else:
+            if self.export_opts.max_workers > 1:
+                self.set_failed("Too many workers for a single mbox.", raise_now=True)
+            mbox_name = ALL_MAIL_MBOX
+
+        self.mbox_path = mbox_dir / (mbox_name + ".mbox")
 
         # We don't export attachments
         if self.export_opts.with_attachments:

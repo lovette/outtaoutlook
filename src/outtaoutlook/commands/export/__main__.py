@@ -626,6 +626,9 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         filter_test=filter_test,
     )
 
+    # Mbox is a single file so requires one worker per mbox.
+    one_mbox = out_format == OutputFormatChoice.mbox and not files_mkdir
+
     if not out_dir:
         errmsg = "Missing option '--outdir' / '-o'."
         raise typer.BadParameter(errmsg)
@@ -634,6 +637,9 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         raise typer.BadParameter(errmsg)
     if folder and allfolders:
         errmsg = "The '--folder' and '--mailbox' options cannot be used together."
+        raise typer.BadParameter(errmsg)
+    if one_mbox and (max_workers and max_workers > 1):
+        errmsg = "When exporting all mail to a single mbox, --max-workers must be set to 1."
         raise typer.BadParameter(errmsg)
 
     try:
@@ -669,7 +675,9 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         raise typer.Exit(code=1)
 
     # We don't need more workers than we have folders.
-    if max_workers:
+    if one_mbox:
+        max_workers = 1
+    elif max_workers:
         max_workers = min(max_workers, len(folders))
     elif len(folders) < MAX_EXPORT_WORKERS:
         max_workers = len(folders)

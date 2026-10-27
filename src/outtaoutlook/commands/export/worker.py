@@ -317,6 +317,8 @@ def _start_workers(  # noqa: C901, PLR0912
     ):
         logger.debug("Starting workers; pool size is %d", executor._max_workers)  # noqa: SLF001
 
+        export_opts.max_workers = executor._max_workers  # noqa: SLF001
+
         for folder in folders:
             # Add tasks to progress bar *before* starting.
             # This keeps the task bars in hierarchical order and ensures
