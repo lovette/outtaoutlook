@@ -60,6 +60,7 @@ class ExportOptions:
     root_out_dir: Path  # Root output directory (set by user.)
     with_attachments: bool  # Whether to download and link attachments to files.
     max_workers: int  # Maximum number of workers being used for exporting.
+    assume_yes: bool  # Automatically confirm all prompts.
 
 
 ######################################################################

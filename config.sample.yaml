@@ -80,6 +80,7 @@ export:
   maxdepth: 5
   mkdir_maxdepth: 5
   max_workers: 3
+  assume_yes: false
 
   filter:
     - "lastModifiedDateTime ge 2026-01-01"

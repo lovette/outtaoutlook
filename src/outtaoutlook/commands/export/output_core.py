@@ -1120,8 +1120,6 @@ class OutputWorkerCore(ABC):
         self.thread_id = thread_id
         self.session = session
 
-        self.update_export_opts()
-
         # Wait for the first thread/worker to get its first batch of messages.
         # This allows the first worker to encounter any issues with
         # the Graph API before other workers proceed and encounter the same.
@@ -1146,6 +1144,7 @@ class OutputWorkerCore(ABC):
 
         export_limit = self.export_opts.files_limit  # 0=no limit
         manifest_id_count = len(self.manifest_ids)
+        filtered = self.export_opts.filter_query or self.export_opts.search_query
 
         # https://learn.microsoft.com/en-us/graph/query-parameters
         params: dict[str, str | int] | None = {
@@ -1198,12 +1197,36 @@ class OutputWorkerCore(ABC):
         first_batch_messages = first_batch_data.get("value", [])
 
         # I'm guessing '@odata.count' is not provided when search results are less than '$top'.
-        messages_count: int = first_batch_data.get("@odata.count") or len(first_batch_messages)
+        messages_count: int = (
+            int(first_batch_data.get("@odata.count", 0)) if "@odata.count" in first_batch_data else len(first_batch_messages)
+        )
+
+        # When filtering or searching, consider all messages remaining.
+        messages_remaining = messages_count if filtered else max(0, messages_count - manifest_id_count)
+
+        export_limit = min(export_limit, messages_remaining) if export_limit else messages_remaining
+
+        ##################################################################
+        # Filter test
 
         if self.export_opts.filter_test:
             # Report the filtered message count next to task progress.
-            self.progress_update(total=1, completed=1, status=f"{messages_count} messages")
+            status = " ".join(
+                filter(
+                    None,
+                    [
+                        f"{messages_count:,}",
+                        "messages",
+                        f"({folder_message_count:,} folder total)" if filtered else None,
+                    ],
+                ),
+            )
+
+            self.progress_update(total=1, completed=1, status=status)
             return
+
+        ##################################################################
+        # Export
 
         if not messages_count:
             if self.export_opts.filter_query:
@@ -1217,20 +1240,11 @@ class OutputWorkerCore(ABC):
 
             return
 
-        # When filtering or searching, consider all messages remaining.
-        messages_remaining = (
-            messages_count
-            if self.export_opts.filter_query or self.export_opts.search_query
-            else max(0, messages_count - manifest_id_count)
-        )
-
         if not messages_remaining:
             self.emit_log("No remaining messages", logging.DEBUG)  # log stream
             self.export_result.add_message("All messages have been exported.")  # reported in results
             self.progress_update(total=0, completed=0, status="done")
             return
-
-        export_limit = min(export_limit, messages_remaining) if export_limit else messages_remaining
 
         self.progress_update(total=export_limit, completed=0)
 
@@ -1239,12 +1253,14 @@ class OutputWorkerCore(ABC):
                 "Exporting",
                 f"all {folder_message_count:,}" if export_limit == folder_message_count else None,
                 f"{export_limit:,} of {messages_count:,}" if export_limit < folder_message_count else None,
-                "(filtered)" if self.export_opts.filter_query or self.export_opts.search_query else None,
+                "(filtered)" if filtered else None,
                 "messages",
                 "(skipping dups)" if self.manifest_path else None,
                 "(dry run)" if self.export_opts.dry_run else None,
             ],
         )
+
+        self.update_export_opts()
 
         self.prepare_export()
 

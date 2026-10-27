@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING, Self, TypedDict
 
 import requests
+import typer
 from requests import sessions
 from rich.progress import BarColumn, Progress, ProgressColumn, SpinnerColumn, Task, TextColumn
 from rich.text import Text
@@ -259,19 +260,22 @@ def _worker_main(
 # Public functions
 
 
-def start_workers(
+def _start_workers(  # noqa: C901, PLR0912
     folders: list[GraphFolderT],
     graph_config: GraphApiConfig,
     export_opts: ExportOptions,
     max_workers: int | None,
-) -> None:
-    """Export a list of folders, each in its own worker.
+) -> list[OutputWorkerCore]:
+    """Show folder message counts and/or export a list of folders, each in its own worker.
 
     Args:
         folders (list[GraphFolderT]): List of folder objects.
         graph_config (GraphApiConfig): Graph API configuration.
         export_opts (ExportOptions): Options for exporting messages.
         max_workers (int or None): Maximum size of worker pool or None to decide based on hardware.
+
+    Returns:
+        list[OutputWorkerCore]: List of output worker instances.
     """
 
     # Keyword arguments to `_worker_main`.
@@ -298,6 +302,10 @@ def start_workers(
 
     if max_workers and max_workers >= MAX_EXPORT_WORKERS:
         max_workers = None  # let ThreadPoolExecutor decide
+
+    if export_opts.filter_test:
+        filtered = ", filtered" if (export_opts.filter_query or export_opts.search_query) else ""
+        console.print(f"[bold]Folder message counts{filtered}:")
 
     with (
         concurrent.futures.ThreadPoolExecutor(max_workers) as executor,
@@ -389,4 +397,41 @@ def start_workers(
 
     logger.debug("All workers are finished!")
 
-    _print_export_results(list(workers.values()))
+    if export_opts.filter_test:
+        console.print()  # blank line
+
+    return list(workers.values())
+
+
+def export_folders(
+    folders: list[GraphFolderT],
+    graph_config: GraphApiConfig,
+    export_opts: ExportOptions,
+    max_workers: int | None,
+) -> None:
+    """Show folder message counts and/or export a list of folders.
+
+    Args:
+        folders (list[GraphFolderT]): List of folder objects.
+        graph_config (GraphApiConfig): Graph API configuration.
+        export_opts (ExportOptions): Options for exporting messages.
+        max_workers (int or None): Maximum size of worker pool or None to decide based on hardware.
+    """
+    if not (export_opts.assume_yes or export_opts.filter_test):
+        # Run a filter test before asking the user to continue with the export.
+        _start_workers(
+            folders,
+            graph_config,
+            copy.replace(export_opts, filter_test=True),
+            max_workers,
+        )
+
+        if export_opts.files_limit:
+            console.print(f"Up to {export_opts.files_limit:,} messages will be exported from each folder.")
+
+        if not typer.confirm("Continue?", default=False):
+            return
+
+    ows = _start_workers(folders, graph_config, export_opts, max_workers)
+
+    _print_export_results(ows)

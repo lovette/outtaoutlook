@@ -42,7 +42,7 @@ from .shared import (
     ExportOptions,
     OutputFormatChoice,
 )
-from .worker import start_workers
+from .worker import export_folders
 
 ######################################################################
 # Global variables
@@ -561,6 +561,14 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
             help="Maximum size of worker pool.",
         ),
     ] = None,
+    assume_yes: Annotated[  # noqa: FBT002
+        bool,
+        typer.Option(
+            "--yes",
+            rich_help_panel="Other options",
+            help="Assume 'yes' as answer to all prompts and run non-interactively.",
+        ),
+    ] = False,
     dry_run: Annotated[  # noqa: FBT002
         bool,
         typer.Option(
@@ -688,6 +696,7 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         root_out_dir=out_dir,
         with_attachments=with_attachments,
         max_workers=max_workers or MAX_EXPORT_WORKERS,
+        assume_yes=assume_yes,
     )
 
     if filter_test:
@@ -715,4 +724,4 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
 
     console.print()
 
-    start_workers(folders, graph_config, export_opts, max_workers)
+    export_folders(folders, graph_config, export_opts, max_workers)
