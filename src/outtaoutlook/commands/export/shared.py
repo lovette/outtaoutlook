@@ -52,7 +52,7 @@ class ExportOptions:
     md_metaprop: FileMetaPropT | None  # --metaprop properties from command line and config file.
     md_tags: list[str] | None  # --tag tags from command line and config file.
     files_dir: Path  # Directory to save files (set internally.)
-    files_limit: int  # Maximum number of files to export (per folder).
+    export_limit: int  # Maximum number of files to export (per folder).
     files_mkdir: bool  # Create mail folder hierarchy in files directory.
     md_place_tags_body_end: bool  # True to place body tags at the end of the file instead the top.
     md_place_tags_frontmatter: bool  # True to place non-body tags in frontmatter.

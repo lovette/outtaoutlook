@@ -426,8 +426,8 @@ def export_folders(
             max_workers,
         )
 
-        if export_opts.files_limit:
-            console.print(f"Up to {export_opts.files_limit:,} messages will be exported from each folder.")
+        if export_opts.export_limit:
+            console.print(f"Up to {export_opts.export_limit:,} messages will be exported from each folder.")
 
         if not typer.confirm("Continue?", default=False):
             return

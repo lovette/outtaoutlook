@@ -1142,7 +1142,7 @@ class OutputWorkerCore(ABC):
         # Ignore manifest when doing filter test
         manifest_data = self._read_manifest() if not self.export_opts.filter_test else None
 
-        export_limit = self.export_opts.files_limit  # 0=no limit
+        export_limit = self.export_opts.export_limit  # 0=no limit
         manifest_id_count = len(self.manifest_ids)
         filtered = self.export_opts.filter_query or self.export_opts.search_query
 

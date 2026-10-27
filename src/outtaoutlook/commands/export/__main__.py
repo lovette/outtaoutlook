@@ -688,7 +688,7 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         md_metaprop=md_metaprop or None,
         md_tags=md_tags or None,
         files_dir=out_dir,
-        files_limit=limit or 0,
+        export_limit=limit or 0,
         files_mkdir=files_mkdir,
         md_place_tags_body_end=md_place_tags_body_end,
         md_place_tags_frontmatter=md_place_tags_frontmatter,
