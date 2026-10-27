@@ -158,6 +158,8 @@ class OutputWorkerMbox(OutputWorkerQueued):
         """Set and optionally update export options for messages in the current folder."""
         super().update_export_opts()
 
+        self.convert_meta_props_to_xheaders()
+
         mbox_dir = self.export_opts.root_out_dir
 
         if not self.export_opts.hier_flat:
@@ -311,7 +313,7 @@ class OutputWorkerMbox(OutputWorkerQueued):
 
         file_date = message["messageDateTime"]
 
-        mailboxmsg = mailbox.mboxMessage(mailbox.Message(content))
+        mailboxmsg = mailbox.mboxMessage(self.get_mailbox_message(message, content))
 
         # Determine the envelope sender so the message delimiter is most accurate.
         sender = mailboxmsg["Return-Path"] or mailboxmsg["Sender"] or mailboxmsg["From"]

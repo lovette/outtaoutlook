@@ -63,7 +63,7 @@ class ExportOptions:
     manifest_dir: Path | None  # Directory to write the manifest file.
     hier_shallow: bool  # Use only the leaf of folder tree when creating mail folder hierarchy.
     md_body_tags: list[str] | None  # --body-tag tags from command line and config file.
-    md_metaprop: FileMetaPropT | None  # --metaprop properties from command line and config file.
+    meta_props: FileMetaPropT | None  # --metaprop properties from command line and config file.
     md_tags: list[str] | None  # --tag tags from command line and config file.
     files_dir: Path  # Directory to save files (set internally.)
     export_limit: int  # Maximum number of files to export (per folder).

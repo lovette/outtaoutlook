@@ -263,6 +263,8 @@ class OutputWorkerMaildir(OutputWorkerQueued):
         """Set and optionally update export options for messages in the current folder."""
         super().update_export_opts()
 
+        self.convert_meta_props_to_xheaders()
+
         # `self.export_opts.files_dir` is the folder path, in the traditional sense,
         # which we use to *find* the actual Maildir directory in which subfolders begin with "."
 
@@ -383,7 +385,7 @@ class OutputWorkerMaildir(OutputWorkerQueued):
 
         file_date = message["messageDateTime"]
 
-        md_message = mailbox.Message(mailbox.Message(content))
+        md_message = self.get_mailbox_message(message, content)
 
         try:
             self.maildir.add(md_message, file_date, mdid=message["ooid"])

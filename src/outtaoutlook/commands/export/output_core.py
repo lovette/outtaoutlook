@@ -6,13 +6,18 @@ import hashlib
 import itertools
 import json
 import logging
+import mailbox
 import mimetypes
 import os
+import re
 import threading
+import unicodedata
 from abc import ABC, abstractmethod
 from collections import defaultdict
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
+from email.header import Header
 from enum import StrEnum
 from functools import cached_property
 from pathlib import Path
@@ -33,10 +38,12 @@ from outtaoutlook.graphapi import (
     log_message_notice,
 )
 from outtaoutlook.shared import (
+    RE_TITLE_WHITESPACE,
     VERBOSE_LEVEL_DEBUG,
     VERBOSE_LEVEL_MORE,
     ExportCancelledError,
     ExportError,
+    FileMetaPropT,
     datetime_now,
     get_hash_filename,
     logger,
@@ -53,8 +60,6 @@ from .shared import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
-
     from rich.progress import Progress, Task, TaskID
 
 
@@ -85,6 +90,15 @@ MESSAGE_DATATYPE_EVENT_MESSAGE_SET = {
 }
 
 EXPECTED_MESSAGE_FIELDS_SET = GRAPH_MESSAGE_FIELDS_SET | {"@odata.etag"}
+
+# Tag and property variables in the format '{tag.propertyName}'
+RE_TAG_VAR = re.compile(r"{[a-zA-Z.]+}")
+
+# Collapse sequential whitespace, underscores and hypens.
+RE_X_HEADER_HYPHENATE = re.compile(r"[:\s_-]+")
+
+# Strip out any character that is NOT an allowed printable ASCII character or colon.
+RE_X_HEADER_REMOVE = re.compile(r"[^\x21-\x39\x3b-\x7e]")
 
 
 ######################################################################
@@ -230,6 +244,119 @@ class OutputWorkerCore(ABC):
                 logger.info("Created %s directory '%s'", purpose, dir_path)
             else:
                 logger.info("Created %s directory '%s' (dry run)", purpose, dir_path)
+
+    @staticmethod
+    def _expand_vars_dict(d: FileMetaPropT, prop_vars: dict[str, str]) -> FileMetaPropT:
+        """Expand dynamic variable references in a dictionary of metadata properties.
+
+        Args:
+            d (FileMetaPropT): Dictionary of properties to expand.
+            prop_vars (dict[str, str]): Dictionary of replacement patterns.
+
+        Returns:
+            FileMetaPropT: Updated dictionary with message-related placeholders expanded.
+        """
+
+        def _varrepl(m: re.Match) -> str:
+            var_name: str = m.group(0)
+            return prop_vars.get(var_name, var_name)
+
+        if not d:
+            return {}
+
+        d = d.copy()  # don't modify caller
+
+        for key, value in d.items():
+            if isinstance(value, str):
+                d[key] = RE_TAG_VAR.sub(_varrepl, value)
+
+        return d
+
+    @staticmethod
+    def _expand_vars_list(lst: list[str], prop_vars: dict[str, str]) -> list[str]:
+        """Expand dynamic variable references in a list of tags.
+
+        Args:
+            lst (list[str]): List of tags or metadata properties to expand.
+            prop_vars (dict[str, str]): Dictionary of replacement patterns.
+
+        Returns:
+            list[str]: New list with dynamic placeholders expanded.
+        """
+
+        def _varrepl(m: re.Match) -> str:
+            var_name: str = m.group(0)
+            return prop_vars.get(var_name, var_name)
+
+        if not lst:
+            return []
+
+        return [RE_TAG_VAR.sub(_varrepl, _tag) for _tag in lst]
+
+    def _expand_folder_tags(
+        self,
+        tags: list[str] | None,
+        tag_vars: dict[str, str],
+    ) -> list[str] | None:
+        """Expand dynamic folder-related tags.
+
+        Args:
+            tags (list[str] | None): List of tags to expand.
+            tag_vars (dict[str, str]): Dictionary of replacement patterns.
+
+        Returns:
+            list[str] | None: Updated list of tags with folder-related placeholders expanded.
+        """
+        if not tags:
+            return None
+
+        tags = self._expand_vars_list(tags, tag_vars)
+
+        add_tags: list[str] = []
+        remove_tags: set[int] = set()
+
+        # Expand placeholders
+        for i, tag in enumerate(tags):
+            if "{folder.folderPath.parts}" in tag:
+                add_tags.extend(part for part in self.folder_path.parts)
+                remove_tags.add(i)  # remove placeholder from list
+
+        if remove_tags:
+            tags = [tag for i, tag in enumerate(tags) if i not in remove_tags]
+        if add_tags:
+            tags.extend(add_tags)
+
+        return tags
+
+    def _expand_folder_metaprop(
+        self,
+        metaprop: FileMetaPropT | None,
+        prop_vars: dict[str, str],
+    ) -> FileMetaPropT | None:
+        """Expand dynamic folder-related metadata properties.
+
+        Args:
+            metaprop (FileMetaPropT | None): Dictionary of metadata to expand.
+            prop_vars (dict[str, str]): Dictionary of replacement patterns.
+
+        Returns:
+            FileMetaPropT | None: Updated dictionary of metadata with folder-related placeholders expanded.
+
+        Raises:
+            ValueError
+        """
+        if not metaprop:
+            return None
+
+        metaprop = self._expand_vars_dict(metaprop, prop_vars)
+
+        for name, value in metaprop.items():
+            if isinstance(value, str) and "{folder.folderPath.parts}" in value:
+                # Markdown frontmatter can include list types so we can simply pass it along
+                path_parts = Path(self.folder["folderPath"]).parts
+                metaprop[name] = path_parts[0] if len(path_parts) == 1 else path_parts
+
+        return metaprop
 
     def _list_messages(
         self,
@@ -701,6 +828,135 @@ class OutputWorkerCore(ABC):
             batch_total += 1
 
         return batch_total, dup_total, written_total, next_url
+
+    def get_folder_tag_vars(self) -> dict[str, str]:
+        """Generate a dictionary of dynamic replacement patterns for folder-related tags.
+
+        Returns:
+            dict[str, str]: ("{variable}", "value")
+        """
+        return {
+            "{folder.displayName}": self.folder_name,
+            "{folder.folderPath}": str(self.folder_path),
+        }
+
+    def get_message_tag_vars(self, message: GraphMessageT) -> dict[str, str]:
+        """Generate a dictionary of dynamic replacement patterns for message-related tags.
+
+        Args:
+            message (GraphMessageT): A message object.
+
+        Returns:
+            dict[str, str]: ("{variable}", "value")
+        """
+        tag_vars: dict[str, str] = {}
+
+        for var_name, dt in (
+            ("now", datetime_now()),
+            ("message.date", message["messageDateTime"]),
+            ("message.created", message["createdDateTime"]),
+            ("message.modified", message["lastModifiedDateTime"]),
+            ("message.received", message["receivedDateTime"]),
+            ("message.sent", message["sentDateTime"]),
+        ):
+            tag_vars[f"{{{var_name}.datetime}}"] = dt.strftime("%Y-%m-%dT%H:%M:%S")
+            tag_vars[f"{{{var_name}.date}}"] = dt.strftime("%Y-%m-%d")
+            tag_vars[f"{{{var_name}.time}}"] = dt.strftime("%H:%M:%S")
+            tag_vars[f"{{{var_name}.year}}"] = f"{dt.year}"
+
+        return tag_vars
+
+    def get_message_metaprop_vars(self, message: GraphMessageT) -> dict[str, str]:
+        """Generate a dictionary of dynamic replacement patterns for message-related metadata properties.
+
+        Args:
+            message (GraphMessageT): A message object.
+
+        Returns:
+            dict[str, str]: ("{variable}", "value")
+        """
+        return self.get_message_tag_vars(message) | {
+            "{file.title}": message["fileTitle"],
+            "{message.subject}": message["subject"],
+        }
+
+    @staticmethod
+    def _clean_x_header(header: str) -> str | None:
+        """Cleans input to be a valid RFC 5322 header field name.
+
+        Args:
+            header (str): Header field name.
+
+        Returns:
+            str | None: Header or None if invalid.
+        """
+        header = unicodedata.normalize("NFKD", header).encode("ascii", "ignore").decode("ascii")
+        header = RE_X_HEADER_HYPHENATE.sub("-", header).strip("-")
+        header = RE_X_HEADER_REMOVE.sub("", header)
+        header = "-".join(word.capitalize() for word in header.split("-"))
+        return header or None
+
+    @staticmethod
+    def _clean_x_value(header: str, value: str) -> str:
+        """Cleans input to be a valid RFC 5322 header value.
+
+        Args:
+            header (str): Header field name.
+            value (str): Header field value.
+
+        Returns:
+            str: Cleaned and encoded header value.
+        """
+        value = RE_TITLE_WHITESPACE.sub(" ", value)  # collapse whitespace
+        value = "".join(char for char in value if unicodedata.category(char) != "Cc")
+        return Header(value, charset="utf-8", header_name=header).encode()
+
+    def get_mailbox_message(self, message: GraphMessageT, content: bytes) -> mailbox.Message:
+        """Generate a mailbox.Message object from raw content and message metadata.
+
+        Args:
+            message (GraphMessageT): A message object.
+            content (bytes): Message raw content.
+
+        Returns:
+            mailbox.Message
+        """
+        mb_message = mailbox.Message(content)
+
+        # Expand dynamic variable references.
+        metaprop = self._expand_vars_dict(
+            self.export_opts.meta_props or {},
+            self.get_message_metaprop_vars(message),
+        )
+
+        # X-header names must be converted into valid email header names before now!
+        for xheader, value in metaprop.items():
+            # Properties can be non-string types...
+            if isinstance(value, str):
+                xvalue = [value]
+            elif isinstance(value, Sequence):
+                xvalue = [str(v) for v in value]
+            else:
+                xvalue = [str(value)]
+
+            mb_message[xheader] = self._clean_x_value(xheader, ", ".join(xvalue))
+
+        return mb_message
+
+    def convert_meta_props_to_xheaders(self) -> None:
+        """Convert `meta_props` keys into valid email "X-" headers."""
+        if self.export_opts.meta_props:
+            meta_props = {}
+
+            for prop, value in self.export_opts.meta_props.items():
+                xheader = self._clean_x_header(prop)
+                if not xheader:
+                    self.emit_log(f"Metadata property name cannot be used as an email X-header: '{prop}'", logging.WARNING)
+                    continue
+
+                meta_props[f"X-{xheader}"] = value
+
+            self.export_opts.meta_props = meta_props
 
     def emit_log(self, errmsg: str | Sequence[str | None], level: int = logging.INFO) -> None:
         """Emit a log message related to the current folder.
@@ -1307,6 +1563,7 @@ class OutputWorkerCore(ABC):
         attachments_folder = self.export_opts.attachments_folder
         attachments_dir_path = Path(attachments_folder)  # assume it's an absolute path to start
         attachments_mkdir = self.export_opts.attachments_mkdir
+        folder_tag_vars = self.get_folder_tag_vars()
 
         # If folder path is "A/B/C" write to "/C" if shallow is true.
         folder_path_mkdir = self.folder_path if not self.export_opts.hier_shallow else Path(self.folder_path.parts[-1])
@@ -1333,6 +1590,10 @@ class OutputWorkerCore(ABC):
         self.export_opts.files_dir = files_dir
         self.export_opts.attachments_mkdir = attachments_mkdir
         self.export_opts.attachments_folder = attachments_dir_path
+
+        self.export_opts.md_tags = self._expand_folder_tags(self.export_opts.md_tags, folder_tag_vars)
+        self.export_opts.md_body_tags = self._expand_folder_tags(self.export_opts.md_body_tags, folder_tag_vars)
+        self.export_opts.meta_props = self._expand_folder_metaprop(self.export_opts.meta_props, folder_tag_vars)
 
     def update_messages_params(self: Self, params: dict[str, str | int]) -> None:  # noqa: B027
         """Update parameters used in the '/messages' Graph API request.

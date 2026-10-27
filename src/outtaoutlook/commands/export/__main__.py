@@ -402,7 +402,8 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
             "-p",
             callback=_opt_metaprop_callback,
             metavar="NAME=VALUE",
-            help="Frontmatter metadata property to apply to files; option can be used more than once.",
+            help="Metadata property to include in Markdown frontmatter or as an email message X-Header; "
+            "option can be used more than once.",
             rich_help_panel="Tags and metadata",
         ),
     ] = None,
@@ -462,7 +463,7 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         bool,
         typer.Option(
             "--place-tags-frontmatter/--no-place-tags-frontmatter",
-            help="Place --tag tags in file frontmatter.",
+            help="Place --tag tags in Markdown frontmatter.",
             rich_help_panel="Tags and metadata",
         ),
     ] = False,
@@ -470,7 +471,7 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         bool,
         typer.Option(
             "--place-tags-body-end/--no-place-tags-body-end",
-            help="Place body tags at the end of the file instead of the top.",
+            help="Place body tags at the end of the Markdown body instead of the top.",
             rich_help_panel="Tags and metadata",
         ),
     ] = False,
@@ -621,7 +622,7 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
 
     md_tags = config_file_md_tags + (tag or [])
     md_body_tags = config_file_md_body_tags + (body_tag or [])
-    md_metaprop = _merge_metaprops(config_file_md_metaprop, ctx_obj.export_metaprops)
+    meta_props = _merge_metaprops(config_file_md_metaprop, ctx_obj.export_metaprops)
     not_folder = config_file_not_folder + (not_folder or [])
     not_folder_set = {nf.lower() for nf in not_folder}
     folder = config_file_select_folder + (folder or [])
@@ -710,7 +711,7 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         manifest_dir=common_opts.cache_dir if use_manifest else None,
         hier_shallow=shallow,
         md_body_tags=md_body_tags or None,
-        md_metaprop=md_metaprop or None,
+        meta_props=meta_props or None,
         md_tags=md_tags or None,
         files_dir=out_dir,
         export_limit=limit or 0,

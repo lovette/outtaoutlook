@@ -35,6 +35,12 @@ class OutputWorkerEml(OutputWorkerQueued):
     ######################################################################
     # Method overrides
 
+    def update_export_opts(self) -> None:
+        """Set and optionally update export options for messages in the current folder."""
+        super().update_export_opts()
+
+        self.convert_meta_props_to_xheaders()
+
     def update_messages_params(self: Self, params: dict[str, str | int]) -> None:
         """Update parameters used in the '/messages' Graph API request.
 
@@ -91,10 +97,9 @@ class OutputWorkerEml(OutputWorkerQueued):
         if content is None:
             return _skip_message(ExportStat.STAT_SKIPPED_NO_MESSAGE_BODY, logging.WARNING)
 
-        if self.export_opts.prime_cache:
-            return 1  # only prime the cache, do not write files
+        mb_message = self.get_mailbox_message(message, content)
 
-        self.write_output_file(file_path, content, file_date)
+        self.write_output_file(file_path, mb_message.as_bytes(), file_date)
 
         self.export_stats.incr(ExportStat.STAT_MESSAGE_EXPORTED)
 
