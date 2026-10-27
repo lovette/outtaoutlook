@@ -379,7 +379,7 @@ class OutputWorkerMaildir(OutputWorkerQueued):
         """
 
         def _skip_message(skip_reason: ExportStat, level: int) -> int:
-            self.increxportstat(skip_reason)
+            self.export_stats.incr(skip_reason)
             log_message_notice(message, skip_reason.value, level)
             return 1
 
@@ -400,7 +400,7 @@ class OutputWorkerMaildir(OutputWorkerQueued):
             errmsg = f"Message already exists in Maildir: {message['ooid']}: '{message['subject']}'"
             self.emit_log(errmsg, logging.WARNING)
 
-        self.increxportstat(ExportStat.STAT_MESSAGE_EXPORTED)
+        self.export_stats.incr(ExportStat.STAT_MESSAGE_EXPORTED)
 
         if self.export_opts.dry_run:
             self.emit_log(f"Added message to Maildir: '{message['subject']}' (dry run)", logging.DEBUG)

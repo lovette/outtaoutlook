@@ -309,7 +309,7 @@ class OutputWorkerMbox(OutputWorkerQueued):
         """
 
         def _skip_message(skip_reason: ExportStat, level: int) -> int:
-            self.increxportstat(skip_reason)
+            self.export_stats.incr(skip_reason)
             log_message_notice(message, skip_reason.value, level)
             return 1
 
@@ -333,7 +333,7 @@ class OutputWorkerMbox(OutputWorkerQueued):
 
         self._mbox.add(mailboxmsg)
 
-        self.increxportstat(ExportStat.STAT_MESSAGE_EXPORTED)
+        self.export_stats.incr(ExportStat.STAT_MESSAGE_EXPORTED)
 
         if self.export_opts.dry_run:
             self.emit_log(f"Added message to mbox: '{message['subject']}' (dry run)", logging.DEBUG)

@@ -80,7 +80,7 @@ class OutputWorkerHtml(OutputWorkerCore):
         """
 
         def _skip_message(skip_reason: ExportStat, level: int) -> int:
-            self.increxportstat(skip_reason)
+            self.export_stats.incr(skip_reason)
             log_message_notice(message, skip_reason.value, level)
             return 1
 
@@ -108,6 +108,6 @@ class OutputWorkerHtml(OutputWorkerCore):
 
         self.write_output_file(file_path, body_content, file_date)
 
-        self.increxportstat(ExportStat.STAT_MESSAGE_EXPORTED)
+        self.export_stats.incr(ExportStat.STAT_MESSAGE_EXPORTED)
 
         return 1

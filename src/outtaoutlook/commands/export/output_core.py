@@ -105,7 +105,17 @@ class ExportStat(StrEnum):
     STAT_SKIPPED_EVENT_MESSAGE = "Skipped; Calendar event"
 
 
-ExportStatsT = dict[ExportStat, int]
+class ExportStatsT(dict[ExportStat, int]):
+    """Export statistics."""
+
+    def incr(self, stat: ExportStat, incr: int = 1) -> None:
+        """Increment specified export stat.
+
+        Args:
+            stat (ExportStat): Stat to increment.
+            incr (int, optional): Increment amount. Defaults to 1.
+        """
+        self[stat] = self.get(stat, 0) + incr
 
 
 @dataclass
@@ -163,7 +173,7 @@ class OutputWorkerCore(ABC):
         self.progress = progress
         self.progress_task_id = progress_task_id
         self.export_opts = export_opts
-        self.export_stats: ExportStatsT = {}
+        self.export_stats = ExportStatsT()
         self.export_result = ExportResult()
         self.manifest_ids: set[str] = set()
         self.write_messages_status = "writing files"
@@ -590,7 +600,7 @@ class OutputWorkerCore(ABC):
         if is_calendar_related:
             # Calendar requests and responses are skipped
             skip_reason, level = ExportStat.STAT_SKIPPED_EVENT_MESSAGE, logging.DEBUG
-            self.increxportstat(skip_reason)
+            self.export_stats.incr(skip_reason)
             log_message_notice(message, skip_reason.value, level)
             return 1  # don't write empty files
 
@@ -604,7 +614,7 @@ class OutputWorkerCore(ABC):
                 file_date,
             )
 
-            self.increxportstat(ExportStat.STAT_ATTACHMENT_SAVED, len(attachment_paths))
+            self.export_stats.incr(ExportStat.STAT_ATTACHMENT_SAVED, len(attachment_paths))
 
         # Export the message in specified format.
         return self.export_write_message(
@@ -671,7 +681,7 @@ class OutputWorkerCore(ABC):
                     self.progress_update(advance=n_advance)
             else:
                 dup_total += 1
-                self.increxportstat(ExportStat.STAT_SKIPPED_DUPLICATE)
+                self.export_stats.incr(ExportStat.STAT_SKIPPED_DUPLICATE)
 
             batch_total += 1
 
@@ -893,15 +903,6 @@ class OutputWorkerCore(ABC):
                     f"Wrote {len(self.manifest_ids):,} message IDs to manifest: '{self.manifest_path}'",
                     logging.DEBUG,
                 )
-
-    def increxportstat(self, stat: ExportStat, incr: int = 1) -> None:
-        """Increment specified export stat.
-
-        Args:
-            stat (ExportStat): Stat to increment.
-            incr (int, optional): Increment amount. Defaults to 1.
-        """
-        self.export_stats[stat] = self.export_stats.get(stat, 0) + incr
 
     def write_output_file(
         self,
