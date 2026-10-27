@@ -17,6 +17,7 @@ from outtaoutlook.graphapi import GraphFolderT, GraphMessageT, log_message_notic
 from outtaoutlook.shared import FileMetaPropT, datetime_now
 
 from .output_core import ExportOptions, ExportStat, OutputWorkerCore
+from .shared import DEFAULT_SELECT_MESSAGE_FIELDS
 
 ######################################################################
 # Constants
@@ -28,17 +29,10 @@ RE_TAG_VAR = re.compile(r"{[a-zA-Z.]+}")
 # Message fields we require for exporting.
 SELECT_MESSAGE_FIELDS = ",".join(
     sorted(
-        [
-            "id",
-            "subject",
+        (
+            *DEFAULT_SELECT_MESSAGE_FIELDS,
             "body",
-            "isDraft",
-            "hasAttachments",
-            "createdDateTime",
-            "lastModifiedDateTime",
-            "sentDateTime",
-            "receivedDateTime",
-        ],
+        ),
     ),
 )
 

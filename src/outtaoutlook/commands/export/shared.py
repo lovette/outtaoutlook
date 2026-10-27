@@ -12,12 +12,26 @@ if TYPE_CHECKING:
 ######################################################################
 # Constants
 
+
 MAX_EXPORT_WORKERS = 32  # maximum ThreadPoolExecutor will use
 
 ATTACHMENTS_FOLDER_FILE = "same"
 ATTACHMENTS_FOLDER_ROOT = "root"
 
 ATTACHMENTS_DEFAULT_FOLDER = "assets"
+
+# Message fields we reference for exporting.
+# We need subject for log messages and dates for file name and timestamp.
+DEFAULT_SELECT_MESSAGE_FIELDS = (
+    "id",
+    "subject",
+    "isDraft",
+    "hasAttachments",
+    "createdDateTime",
+    "lastModifiedDateTime",
+    "sentDateTime",
+    "receivedDateTime",
+)
 
 
 ######################################################################

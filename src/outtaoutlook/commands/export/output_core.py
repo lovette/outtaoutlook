@@ -85,7 +85,6 @@ MESSAGE_DATATYPE_EVENT_MESSAGE_SET = {
 }
 
 EXPECTED_MESSAGE_FIELDS_SET = GRAPH_MESSAGE_FIELDS_SET | {"@odata.etag"}
-MESSAGE_DATE_FIELDS = ["createdDateTime", "lastModifiedDateTime", "sentDateTime", "receivedDateTime"]
 
 
 ######################################################################

@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Self
 from outtaoutlook.graphapi import GraphMessageT, log_message_notice
 
 from .output_core import ExportStat, OutputWorkerCore
+from .shared import DEFAULT_SELECT_MESSAGE_FIELDS
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -13,22 +14,18 @@ if TYPE_CHECKING:
 ######################################################################
 # Constants
 
+
 # Message fields we require for exporting.
 SELECT_MESSAGE_FIELDS = ",".join(
     sorted(
-        [
-            "id",
-            "subject",
+        (
+            *DEFAULT_SELECT_MESSAGE_FIELDS,
             "body",
-            "isDraft",
-            "hasAttachments",
-            "createdDateTime",
-            "lastModifiedDateTime",
-            "sentDateTime",
-            "receivedDateTime",
-        ],
+        ),
     ),
 )
+
+
 ######################################################################
 # Public module class
 

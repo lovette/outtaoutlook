@@ -14,29 +14,17 @@ from outtaoutlook.shared import VERBOSE_LEVEL_MORE, logger, safe_file_name
 
 from .output_core import TITLE_UNTITLED, ExportStat
 from .output_queued import OutputWorkerQueued
+from .shared import DEFAULT_SELECT_MESSAGE_FIELDS
 
 ######################################################################
 # Constants
 
 
 # Message fields we reference for exporting.
-# We need subject for log messages and dates for file name and timestamp.
-SELECT_MESSAGE_FIELDS = ",".join(
-    sorted(
-        [
-            "id",
-            "subject",
-            "isDraft",
-            "hasAttachments",
-            "createdDateTime",
-            "lastModifiedDateTime",
-            "sentDateTime",
-            "receivedDateTime",
-        ],
-    ),
-)
+SELECT_MESSAGE_FIELDS = ",".join(sorted(DEFAULT_SELECT_MESSAGE_FIELDS))
 
 ALL_MAIL_MBOX = "All Mail"
+
 
 ######################################################################
 # MboxWrapper class
