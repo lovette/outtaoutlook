@@ -20,7 +20,6 @@ from rich.console import Console
 
 
 APP_NAME = "outtaoutlook"
-VERBOSE_LOGGING_LEVEL_ERROR = 0  # logging.ERROR
 TITLE_MAXLEN = 255 - 25  # macOS limit minus a few characters for whatever `unique_file_path` tacks on
 
 # These are banned outright: \/:
@@ -30,6 +29,12 @@ TITLE_MAXLEN = 255 - 25  # macOS limit minus a few characters for whatever `uniq
 # \x00-\x1f\x7f = [:cntrl:]
 RE_TITLE_IGNORECHARS = re.compile(r"[\[\]\/\\:|^#\x00-\x1f\x7f]")
 RE_TITLE_WHITESPACE = re.compile(r"\s+")
+
+VERBOSE_LEVEL_ERROR = 0  # logging.ERROR
+VERBOSE_LEVEL_WARNING = 1  # -v, logging.WARNING
+VERBOSE_LEVEL_INFO = 2  # -vv, logging.INFO
+VERBOSE_LEVEL_DEBUG = 3  # -vvv, logging.DEBUG
+VERBOSE_LEVEL_MORE = 4  # -vvvv, logging.DEBUG
 
 
 ######################################################################
@@ -62,7 +67,7 @@ class CommonCommandOptions:
     auth_file_path: Path | None = None
     cache_dir: Path | None = None
     graph_cache_enabled: bool = False
-    verbose: int = VERBOSE_LOGGING_LEVEL_ERROR
+    verbose: int = VERBOSE_LEVEL_ERROR
     offline: bool = False
 
 

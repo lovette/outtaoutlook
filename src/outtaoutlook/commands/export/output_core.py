@@ -33,6 +33,8 @@ from outtaoutlook.graphapi import (
     log_message_notice,
 )
 from outtaoutlook.shared import (
+    VERBOSE_LEVEL_DEBUG,
+    VERBOSE_LEVEL_MORE,
     ExportCancelledError,
     ExportError,
     datetime_now,
@@ -614,7 +616,8 @@ class OutputWorkerCore(ABC):
             # Calendar requests and responses are skipped
             skip_reason, level = ExportStat.STAT_SKIPPED_EVENT_MESSAGE, logging.DEBUG
             self.export_stats.incr(skip_reason)
-            log_message_notice(message, skip_reason.value, level)
+            if self.export_opts.verbose > VERBOSE_LEVEL_DEBUG:
+                log_message_notice(message, skip_reason.value, level)
             return 1  # don't write empty files
 
         file_path = self.get_file_path(message)
@@ -709,7 +712,10 @@ class OutputWorkerCore(ABC):
         """
         if not isinstance(errmsg, str):
             errmsg = " ".join(filter(None, errmsg)).strip()  # join non-None parts into a string
-        if errmsg:
+            if not errmsg:
+                return
+
+        if level != VERBOSE_LEVEL_MORE or self.export_opts.verbose > VERBOSE_LEVEL_DEBUG:
             logger.log(level, 'folder("%s"): %s', self.folder_path, errmsg)
 
     def set_failed(self, reason: str | Exception, *, raise_now: bool = False) -> None:
@@ -799,7 +805,7 @@ class OutputWorkerCore(ABC):
         assert self.thread_id is not None  # noqa: S101
 
         if self.thread_id > 1 and not self._messages_success_event.is_set():
-            self.emit_log("Waiting to be released", logging.DEBUG)
+            self.emit_log("Waiting to be released", VERBOSE_LEVEL_MORE)
 
             if not self._messages_success_event.wait(timeout=LIST_MESSAGES_SUCCESS_EVENT_WAIT):
                 self.set_failed("Timed out waiting for first worker to release workers.", raise_now=True)
@@ -939,9 +945,10 @@ class OutputWorkerCore(ABC):
             if file_date:
                 os.utime(file_path, (file_date.timestamp(), file_date.timestamp()))
 
-            self.emit_log(f"Wrote file to '{file_path.name}'", logging.DEBUG)
-        else:
-            self.emit_log(f"Wrote file to '{file_path.name}' (dry run)", logging.DEBUG)
+        self.emit_log(
+            f"Wrote file to '{file_path.name}'" + (" (dry run)" if self.export_opts.dry_run else ""),
+            VERBOSE_LEVEL_MORE,
+        )
 
     def prepare_export(self) -> None:
         """Prepare to export messages.
@@ -1038,7 +1045,7 @@ class OutputWorkerCore(ABC):
                     f"{batch_dups:,} duplicates,",
                     f"{batch_written:,} written",
                 ],
-                logging.DEBUG,
+                VERBOSE_LEVEL_MORE,
             )
 
             # Doing this on every batch is inefficient for large folders but

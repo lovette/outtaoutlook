@@ -723,6 +723,7 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         max_workers=max_workers or MAX_EXPORT_WORKERS,
         assume_yes=assume_yes,
         prime_cache=prime_cache,
+        verbose=common_opts.verbose,
     )
 
     if filter_test:

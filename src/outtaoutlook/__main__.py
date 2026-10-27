@@ -12,7 +12,7 @@ import typer
 import yaml
 
 from .commands import auth_app, export_app, ls_app
-from .shared import APP_NAME, VERBOSE_LOGGING_LEVEL_ERROR, CommandContext, console, path_with_vars
+from .shared import APP_NAME, VERBOSE_LEVEL_ERROR, CommandContext, console, path_with_vars
 
 if TYPE_CHECKING:
     from io import TextIOWrapper
@@ -35,7 +35,7 @@ VERBOSE_LOGGING_LEVELS = (
     logging.ERROR,  # default
     logging.WARNING,  # -v
     logging.INFO,  # -vv
-    logging.DEBUG,  # -vvv
+    logging.DEBUG,  # -vvv (VERBOSE_LEVEL_DEBUG)
 )
 
 VERBOSE_LOGGING_FORMATS = {
@@ -374,7 +374,7 @@ def main(  # noqa: PLR0913, PLR0917
             help="Increase verbose level.",
             show_default="minimal",
         ),
-    ] = VERBOSE_LOGGING_LEVEL_ERROR,
+    ] = VERBOSE_LEVEL_ERROR,
     version: Annotated[  # noqa: ARG001
         bool | None,
         typer.Option(

@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Self
 
 from outtaoutlook.graphapi import GraphMessageT, log_message_notice
-from outtaoutlook.shared import logger, safe_file_name
+from outtaoutlook.shared import VERBOSE_LEVEL_MORE, logger, safe_file_name
 
 from .output_core import ExportStat
 from .output_queued import OutputWorkerQueued
@@ -156,7 +156,8 @@ class MaildirWrapper:
 
     def flush(self) -> None:  # noqa: D102
         if self.dry_run:
-            logger.debug("maildir('%s'): flushed (dry run)", self.path.name)
+            # logger.debug("maildir('%s'): flushed (dry run)", self.path.name)
+            pass
         elif self.maildir is None:
             msg = "Failed to flush Maildir: .maildir is not initialized"
             raise ValueError(msg)
@@ -402,10 +403,10 @@ class OutputWorkerMaildir(OutputWorkerQueued):
 
         self.export_stats.incr(ExportStat.STAT_MESSAGE_EXPORTED)
 
-        if self.export_opts.dry_run:
-            self.emit_log(f"Added message to Maildir: '{message['subject']}' (dry run)", logging.DEBUG)
-        else:
-            self.emit_log(f"Added message to Maildir: '{message['subject']}'", logging.DEBUG)
+        self.emit_log(
+            f"Added message to Maildir: '{message['subject']}'" + (" (dry run)" if self.export_opts.dry_run else ""),
+            VERBOSE_LEVEL_MORE,
+        )
 
         return 1
 

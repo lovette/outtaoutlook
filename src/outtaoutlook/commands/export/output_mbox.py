@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Self
 
 from outtaoutlook.graphapi import GraphMessageT, log_message_notice
-from outtaoutlook.shared import logger, safe_file_name
+from outtaoutlook.shared import VERBOSE_LEVEL_MORE, logger, safe_file_name
 
 from .output_core import TITLE_UNTITLED, ExportStat
 from .output_queued import OutputWorkerQueued
@@ -74,7 +74,8 @@ class MboxWrapper:
 
     def flush(self) -> None:  # noqa: D102
         if self.dry_run:
-            logger.debug("'%s': flushed (dry run)", self.path.name)
+            # logger.debug("'%s': flushed (dry run)", self.path.name)
+            pass
         elif self.mbox is None:
             msg = "Failed to flush mbox: .mbox is not initialized"
             raise ValueError(msg)
@@ -335,10 +336,10 @@ class OutputWorkerMbox(OutputWorkerQueued):
 
         self.export_stats.incr(ExportStat.STAT_MESSAGE_EXPORTED)
 
-        if self.export_opts.dry_run:
-            self.emit_log(f"Added message to mbox: '{message['subject']}' (dry run)", logging.DEBUG)
-        else:
-            self.emit_log(f"Added message to mbox: '{message['subject']}'", logging.DEBUG)
+        self.emit_log(
+            f"Added message to mbox: '{message['subject']}'" + (" (dry run)" if self.export_opts.dry_run else ""),
+            VERBOSE_LEVEL_MORE,
+        )
 
         self.mbox_date = max(file_date, self.mbox_date) if self.mbox_date else file_date
 

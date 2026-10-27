@@ -13,6 +13,7 @@ from outtaoutlook.graphapi import (
     graph_get_resource_batch,
     log_message_notice,
 )
+from outtaoutlook.shared import VERBOSE_LEVEL_MORE
 
 from .output_core import OutputWorkerCore
 
@@ -122,7 +123,7 @@ class OutputWorkerQueued(OutputWorkerCore):
         assert len(self._queued_messages) > 0  # noqa: S101
         assert self.session is not None  # noqa: S101
 
-        self.emit_log(f"Processing {len(self._queued_messages)} queued messages", logging.DEBUG)
+        self.emit_log(f"Processing {len(self._queued_messages)} queued messages", VERBOSE_LEVEL_MORE)
 
         url_by_message_id = {
             message_id: f"{GRAPH_API_URL}/me/messages/{message_id}/$value" for message_id in self._queued_messages
