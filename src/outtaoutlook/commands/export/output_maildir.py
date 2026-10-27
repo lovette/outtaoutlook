@@ -218,9 +218,12 @@ class MaildirWrapper:
             Self
 
         Raises:
+            mailbox.NoSuchMailboxError: If the Maildir does not exist and `create` is False.
             mailbox.Error: If the Maildir could not be created.
         """
-        if self.dry_run:
+        if not create or self.path.is_dir():
+            self.maildir = mailbox.Maildir(self.path, create=False)
+        elif self.dry_run:
             logger.debug("maildir('%s'): created (dry run)", self.path.name)
         else:
             self.maildir = mailbox.Maildir(self.path, create=create)
