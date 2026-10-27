@@ -935,7 +935,7 @@ class OutputWorkerCore(ABC):
         The default implementation creates the files directory.
         """
         self.emit_log(f"Saving files to '{self.export_opts.files_dir}'")
-        self._mkdir(self.export_opts.files_dir, "files", parents=self.export_opts.files_mkdir)
+        self._mkdir(self.export_opts.files_dir, "files", parents=not self.export_opts.hier_flat)
 
         # Note: Attachments directory will be created the first time an attachment is saved.
         if self.export_opts.with_attachments:
@@ -1288,15 +1288,10 @@ class OutputWorkerCore(ABC):
         attachments_dir_path = Path(attachments_folder)  # assume it's an absolute path to start
         attachments_mkdir = self.export_opts.attachments_mkdir
 
-        # Determine the folder path to use when creating subdirectories for files and attachments.
-        # For example, if path is "A/B/C" and mkdir_maxdepth is 2, folder_path_mkdir will be "B/C".
-        folder_path_mkdir = (
-            self.folder_path
-            if not self.export_opts.mkdir_maxdepth
-            else Path(*self.folder_path.parts[-self.export_opts.mkdir_maxdepth :])
-        )
+        # If folder path is "A/B/C" write to "/C" if shallow is true.
+        folder_path_mkdir = self.folder_path if not self.export_opts.hier_shallow else Path(self.folder_path.parts[-1])
 
-        if self.export_opts.files_mkdir:
+        if not self.export_opts.hier_flat:
             files_dir = files_dir / folder_path_mkdir
 
         if isinstance(attachments_folder, Path):

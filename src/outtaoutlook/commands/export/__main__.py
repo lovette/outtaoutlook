@@ -474,11 +474,20 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
             rich_help_panel="Tags and metadata",
         ),
     ] = False,
-    files_mkdir: Annotated[  # noqa: FBT002
+    flat: Annotated[  # noqa: FBT002
         bool,
         typer.Option(
-            help="Create mail folder hierarchy in files directory.",
+            "--flat",
+            help="Write all messages to the export directory; do not preserve mail folder hierarchy.",
             rich_help_panel="Mail folders",
+        ),
+    ] = False,
+    shallow: Annotated[  # noqa: FBT002
+        bool,
+        typer.Option(
+            "--shallow",
+            rich_help_panel="Mail folders",
+            help="Use only the leaf (last) folder when creating mail folder hierarchy.",
         ),
     ] = False,
     with_attachments: Annotated[  # noqa: FBT002
@@ -518,15 +527,6 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
             help="Maximum depth of folder tree to export.",
         ),
     ] = 1,
-    mkdir_maxdepth: Annotated[
-        int | None,
-        typer.Option(
-            "--mkdir-maxdepth",
-            min=1,
-            rich_help_panel="Mail folders",
-            help="Maximum depth (from the leaf) of folder tree to create when creating mail folder hierarchy.",
-        ),
-    ] = None,
     use_manifest: Annotated[  # noqa: FBT002
         bool,
         typer.Option(
@@ -627,7 +627,7 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
     )
 
     # Mbox is a single file so requires one worker per mbox.
-    one_mbox = out_format == OutputFormatChoice.mbox and not files_mkdir
+    one_mbox = out_format == OutputFormatChoice.mbox and flat
 
     if not out_dir:
         errmsg = "Missing option '--outdir' / '-o'."
@@ -640,6 +640,9 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         raise typer.BadParameter(errmsg)
     if one_mbox and (max_workers and max_workers > 1):
         errmsg = "When exporting all mail to a single mbox, --max-workers must be set to 1."
+        raise typer.BadParameter(errmsg)
+    if flat and shallow:
+        errmsg = "The '--flat' and '--shallow' options cannot be used together."
         raise typer.BadParameter(errmsg)
 
     try:
@@ -691,13 +694,13 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         filter_query=filter_query,
         filter_test=filter_test,
         manifest_dir=common_opts.cache_dir if use_manifest else None,
-        mkdir_maxdepth=mkdir_maxdepth,
+        hier_shallow=shallow,
         md_body_tags=md_body_tags or None,
         md_metaprop=md_metaprop or None,
         md_tags=md_tags or None,
         files_dir=out_dir,
         export_limit=limit or 0,
-        files_mkdir=files_mkdir,
+        hier_flat=flat,
         md_place_tags_body_end=md_place_tags_body_end,
         md_place_tags_frontmatter=md_place_tags_frontmatter,
         search_query=search_query,

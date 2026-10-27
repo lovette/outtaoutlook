@@ -47,13 +47,13 @@ class ExportOptions:
     filter_query: str | None  # --filter criteria from command line and config file.
     filter_test: bool  # Whether to perform a filter test without exporting.
     manifest_dir: Path | None  # Directory to write the manifest file.
-    mkdir_maxdepth: int | None  # Maximum depth (from the leaf) of folder tree to create when creating mail folder hierarchy.
+    hier_shallow: bool  # Use only the leaf of folder tree when creating mail folder hierarchy.
     md_body_tags: list[str] | None  # --body-tag tags from command line and config file.
     md_metaprop: FileMetaPropT | None  # --metaprop properties from command line and config file.
     md_tags: list[str] | None  # --tag tags from command line and config file.
     files_dir: Path  # Directory to save files (set internally.)
     export_limit: int  # Maximum number of files to export (per folder).
-    files_mkdir: bool  # Create mail folder hierarchy in files directory.
+    hier_flat: bool  # Write all files to root directory, do not preserve mail folder hierarchy.
     md_place_tags_body_end: bool  # True to place body tags at the end of the file instead the top.
     md_place_tags_frontmatter: bool  # True to place non-body tags in frontmatter.
     search_query: str | None  # --search criteria from command line and config file.

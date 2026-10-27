@@ -72,13 +72,13 @@ export:
   use_manifest: true
   limit: 0
   batch_size: 100
-  files_mkdir: false
+  flat: false
   dry_run: false
   with_attachments: true
   attachments_folder: "assets"
   attachments_mkdir: true
   maxdepth: 5
-  mkdir_maxdepth: 5
+  shallow: true
   max_workers: 3
   assume_yes: false
 
