@@ -17,6 +17,8 @@ from rich.text import Text
 from outtaoutlook.graphapi import (
     AUTH_ERROR_USECOMMAND,
     GraphApiConfig,
+    GraphApiStat,
+    GraphApiStatsT,
     GraphAuthRequiredError,
     GraphFolderT,
     print_graph_request_exception,
@@ -172,15 +174,17 @@ def _assign_thread_id() -> int:
     return thread_local_data.thread_id
 
 
-def _print_export_results(ows: Sequence[OutputWorkerCore]) -> None:  # noqa: C901
-    ow_with_results = [ow for ow in ows if ow.has_results or ow.export_result.failed or ow.export_result.cancelled]
-    if not ow_with_results:
+def _print_export_results(ows: Sequence[OutputWorkerCore]) -> None:  # noqa: C901, PLR0912
+    if logger.getEffectiveLevel() != logging.DEBUG:
+        ows = [ow for ow in ows if ow.has_results or ow.export_result.failed or ow.export_result.cancelled]
+
+    if not ows:
         return  # nothing to report
 
     console.print()
     console.print("[bold]Results:")
 
-    for ow in ow_with_results:
+    for ow in ows:
         console.print()
         console.print(f"[bold]'{ow.folder_path}'[/bold]:")
 
@@ -202,6 +206,12 @@ def _print_export_results(ows: Sequence[OutputWorkerCore]) -> None:  # noqa: C90
             stat_count = ow.export_stats.get(stat)
             if stat_count is not None:
                 console.print(f"- {stat}: {stat_count:,}")
+
+        if logger.getEffectiveLevel() == logging.DEBUG:
+            for stat in GraphApiStat:
+                stat_count = ow.graph_config.stats.get(stat)
+                if stat_count is not None:
+                    console.print(f"- {stat}: {stat_count:,}")
 
 
 ######################################################################
@@ -234,23 +244,23 @@ def _worker_main(
 
     except requests.RequestException as err:
         print_graph_request_exception(ow.progress.console, err)
-        ow.set_failed("Encountered a HTTP related exception.")
+        ow.set_failed(err)
     except GraphAuthRequiredError as err:
         # This should have triggered in main thread when calling `get_graph_config`...
         logger.error("%s %s", str(err), AUTH_ERROR_USECOMMAND)
-        ow.set_failed("Encountered an authentication related exception.")
+        ow.set_failed(err)
     except ExportCancelledError:
         # Whichever thread signaled the cancellation already logged the reason...
         pass
     except ExportError as err:
         logger.error("%s", str(err))
-        ow.set_failed("Encountered an export related exception.")
+        ow.set_failed(err)
     except OSError as err:
         logger.error("%s", str(err))
-        ow.set_failed("Encountered an OS related exception.")
+        ow.set_failed(err)
     except ValueError as err:
         logger.error("%s", str(err))
-        ow.set_failed("Encountered a general exception.")
+        ow.set_failed(err)
     finally:
         # First thread must always release the other workers, even on error!
         ow.release_workers()
@@ -333,10 +343,10 @@ def _start_workers(  # noqa: C901, PLR0912
 
             ow = output_worker_class(
                 folder=folder,
-                graph_config=graph_config,
+                graph_config=copy.replace(graph_config, stats=GraphApiStatsT()),  # each gets their own copy
                 progress=progress,
                 progress_task_id=progress_task_id,
-                export_opts=copy.copy(export_opts),  # each gets their own copy
+                export_opts=copy.deepcopy(export_opts),  # each gets their own copy
             )
 
             worker_args: _WorkerArgs = {

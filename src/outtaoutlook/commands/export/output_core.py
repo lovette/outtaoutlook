@@ -176,7 +176,10 @@ class OutputWorkerCore(ABC):
         self.export_stats = ExportStatsT()
         self.export_result = ExportResult()
         self.manifest_ids: set[str] = set()
-        self.write_messages_status = "writing files"
+        self.write_messages_status = "writing files" if not export_opts.prime_cache else "priming cache"
+
+    def __repr__(self) -> str:  # noqa: D105
+        return f"{self.__class__.__name__}({self.folder_path!s})"
 
     ######################################################################
     # Helper methods
@@ -459,22 +462,32 @@ class OutputWorkerCore(ABC):
 
         attachment_path = unique_file_path(self.export_opts.attachments_folder / Path(attachment["name"]), file_date)
 
-        if self.export_opts.dry_run:
-            self.emit_log(f"Wrote attachment to '{attachment_path.name}' ({content_type}) (dry run)", logging.DEBUG)
-        elif content_type and content_type.startswith(("text/", "message/")):
-            attachment_path.write_text(content, encoding="utf-8")
-            self.emit_log(f"Wrote attachment to '{attachment_path.name}' ({content_type})", logging.DEBUG)
-        else:
-            try:
-                with attachment_path.open("wb") as f:
-                    f.write(base64.b64decode(content))
-                self.emit_log(f"Wrote attachment to '{attachment_path.name}' ({content_type})", logging.DEBUG)
-            except binascii.Error as err:
-                log_message_notice(message, f'attachment("{attachment_path.name}"): b64decode failed: {err}', logging.ERROR)
-                return None
+        if self.export_opts.prime_cache:
+            return attachment_path  # only prime the cache, do not write files
+
+        if not self.export_opts.dry_run:
+            if content_type and content_type.startswith(("text/", "message/")):
+                attachment_path.write_text(content, encoding="utf-8")
+            else:
+                try:
+                    with attachment_path.open("wb") as f:
+                        f.write(base64.b64decode(content))
+                except binascii.Error as err:
+                    log_message_notice(
+                        message,
+                        f'attachment("{attachment_path.name}"): b64decode failed: {err}',
+                        logging.ERROR,
+                    )
+                    return None
 
         if attachment_path.is_file():
             os.utime(attachment_path, (file_date.timestamp(), file_date.timestamp()))
+
+        self.emit_log(
+            f"Wrote attachment to '{attachment_path.name}' ({content_type})"
+            + (" (dry run)" if self.export_opts.dry_run else ""),
+            logging.DEBUG,
+        )
 
         return attachment_path
 
@@ -699,13 +712,13 @@ class OutputWorkerCore(ABC):
         if errmsg:
             logger.log(level, 'folder("%s"): %s', self.folder_path, errmsg)
 
-    def set_failed(self, reason: str, *, raise_now: bool = False) -> None:
+    def set_failed(self, reason: str | Exception, *, raise_now: bool = False) -> None:
         """Mark the export as failed and update progress bar task status.
 
         Also releases workers waiting to be released.
 
         Args:
-            reason (str): The reason for the failure.
+            reason (str | Exception): The reason for the failure.
             raise_now (bool, optional): True to raise ExportCancelledError immediately. Defaults to False.
 
         Raises:
@@ -883,7 +896,7 @@ class OutputWorkerCore(ABC):
         Args:
             emitlog (bool, optional): Whether to emit a log message after writing the manifest. Defaults to False.
         """
-        if self.manifest_path and self.manifest_ids:
+        if self.manifest_path and self.manifest_ids and not self.export_opts.prime_cache:
             self.manifest_path.write_text(
                 json.dumps(
                     {

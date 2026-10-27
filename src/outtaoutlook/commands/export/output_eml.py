@@ -103,6 +103,9 @@ class OutputWorkerEml(OutputWorkerQueued):
         if content is None:
             return _skip_message(ExportStat.STAT_SKIPPED_NO_MESSAGE_BODY, logging.WARNING)
 
+        if self.export_opts.prime_cache:
+            return 1  # only prime the cache, do not write files
+
         self.write_output_file(file_path, content, file_date)
 
         self.export_stats.incr(ExportStat.STAT_MESSAGE_EXPORTED)

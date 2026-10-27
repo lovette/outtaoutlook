@@ -6,8 +6,9 @@ import hashlib
 import json
 import logging
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from enum import StrEnum
 from operator import itemgetter
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -52,7 +53,7 @@ AUTH_EXPIRED_ERROR = "Previously granted access to Microsoft Outlook has expired
 AUTH_FAILED_ERROR = "Access to Microsoft Outlook was not granted."
 AUTH_NO_CACHE_ERROR = "Access to Microsoft Outlook has not been granted."
 
-GRAPH_ACCESS_TOKEN_FIELDS = [
+GRAPH_ACCESS_TOKEN_FIELDS = (
     "access_token",
     "client_info",
     "expires_in",
@@ -63,9 +64,9 @@ GRAPH_ACCESS_TOKEN_FIELDS = [
     "scope",
     "token_source",
     "token_type",
-]
+)
 
-GRAPH_CACHED_TOKEN_FIELDS = [
+GRAPH_CACHED_TOKEN_FIELDS = (
     "cached_at",
     "client_id",
     "credential_type",
@@ -77,9 +78,9 @@ GRAPH_CACHED_TOKEN_FIELDS = [
     "secret",
     "target",
     "token_type",
-]
+)
 
-GRAPH_ACCOUNT_FIELDS = [
+GRAPH_ACCOUNT_FIELDS = (
     "account_source",
     "authority_type",
     "environment",
@@ -87,15 +88,15 @@ GRAPH_ACCOUNT_FIELDS = [
     "local_account_id",
     "realm",
     "username",
-]
+)
 
-GRAPH_APPMETADATA_FIELDS = [
+GRAPH_APPMETADATA_FIELDS = (
     "client_id",
     "environment",
-]
+)
 
 # Fields returned from '/mailFolders'
-GRAPH_FOLDER_FIELDS = [
+GRAPH_FOLDER_FIELDS = (
     "id",  # str
     "displayName",  # str
     "parentFolderId",  # str
@@ -105,11 +106,11 @@ GRAPH_FOLDER_FIELDS = [
     "sizeInBytes",  # int
     "wellKnownName",  # str or 'null'
     "isHidden",  # bool
-]
+)
 
 # Fields returned from '/messages' and '/message'.
 # Not all fields are guaranteed to be present in every message.
-GRAPH_MESSAGE_FIELDS = [
+GRAPH_MESSAGE_FIELDS = (
     "@odata.etag",  # str
     "bccRecipients",  # [{'emailAddress': {'name': str, 'address': str}}, ...]
     "body",  #  { "contentType": "html", "content": str, },
@@ -143,9 +144,9 @@ GRAPH_MESSAGE_FIELDS = [
     "unsubscribeData",  # []
     "unsubscribeEnabled",  # bool
     "webLink",  # "URL"
-]
+)
 
-GRAPH_ATTACHMENT_FIELDS = [
+GRAPH_ATTACHMENT_FIELDS = (
     "@odata.mediaContentType",  # str; e.g. 'image/jpeg'
     "@odata.type",  # #microsoft.graph.[itemAttachment|fileAttachment]
     "contentBytes",  # str; if isInline is True
@@ -157,7 +158,7 @@ GRAPH_ATTACHMENT_FIELDS = [
     "lastModifiedDateTime",  # isodate; unreliable, how does a message dated 2009 have a modified date of 2025?!
     "name",  # str
     "size",  # int
-]
+)
 
 GRAPH_ACCESS_TOKEN_FIELDS_SET = set(GRAPH_ACCESS_TOKEN_FIELDS)
 GRAPH_CACHED_TOKEN_FIELDS_SET = set(GRAPH_CACHED_TOKEN_FIELDS)
@@ -190,6 +191,29 @@ GraphAppMetadataT = dict[str, Any]  # GRAPH_APPMETADATA_FIELDS
 GraphAttachmentT = dict[str, Any]  # GRAPH_ATTACHMENT_FIELDS_SET
 
 
+class GraphApiStat(StrEnum):
+    """Graph API statistic messages."""
+
+    GRAPHAPI_STAT_GET = "API GET"
+    GRAPHAPI_STAT_POST = "API POST"
+    GRAPHAPI_STAT_BATCH_GET = "API GET (batched)"
+    GRAPHAPI_STAT_CACHE_HIT = "API cache hit"
+    GRAPHAPI_STAT_CACHE_MISS = "API cache miss"
+
+
+class GraphApiStatsT(dict[GraphApiStat, int]):
+    """Graph API statistics."""
+
+    def incr(self, stat: GraphApiStat, incr: int = 1) -> None:
+        """Increment specified stat.
+
+        Args:
+            stat (GraphApiStat): Stat to increment.
+            incr (int, optional): Increment amount. Defaults to 1.
+        """
+        self[stat] = self.get(stat, 0) + incr
+
+
 @dataclass
 class CachedAccessTokenInfo:
     """Relevant details from SerializableTokenCache."""
@@ -208,7 +232,9 @@ class GraphApiConfig:
     access_token: str
     cache_dir: Path | None
     cache_enabled: bool
+    offline: bool
     token_info: CachedAccessTokenInfo
+    stats: GraphApiStatsT = field(default_factory=GraphApiStatsT)
 
 
 ######################################################################
@@ -217,6 +243,13 @@ class GraphApiConfig:
 
 class GraphApiError(ExportError):
     """Base class for Graph API related errors."""
+
+
+class GraphApiOfflineError(GraphApiError):
+    """Raised when a Graph API request is attempted in offline mode."""
+
+    def __init__(self) -> None:  # noqa: D107
+        super().__init__("Graph API request attempted in offline mode.")
 
 
 class GraphEmptyRootFolderError(GraphApiError):
@@ -692,6 +725,7 @@ def get_graph_config(common_opts: CommonCommandOptions) -> GraphApiConfig:
         access_token=token["access_token"],
         cache_enabled=common_opts.graph_cache_enabled,
         cache_dir=common_opts.cache_dir,
+        offline=common_opts.offline,
         token_info=token_info,
     )
 
@@ -1020,7 +1054,15 @@ def graph_get_resource(
     if cache_file_path:
         resp_json = _get_cached_response(cache_file_path, req.url, cache_json_header)
         if resp_json is not None:
+            graph_config.stats.incr(GraphApiStat.GRAPHAPI_STAT_CACHE_HIT)
             return resp_json
+
+        graph_config.stats.incr(GraphApiStat.GRAPHAPI_STAT_CACHE_MISS)
+
+    if graph_config.offline:
+        raise GraphApiOfflineError
+
+    graph_config.stats.incr(GraphApiStat.GRAPHAPI_STAT_GET)
 
     with graph_get_resource_lock:
         resp = session.send(req, timeout=GRAPH_API_TIMEOUT)
@@ -1062,6 +1104,8 @@ def graph_post_resource(  # noqa: PLR0913, PLR0917
         requests.RequestException derived error (e.g. ConnectionError, JSONDecodeError, HTTPError, etc.)
         OSError derived error (e.g. file system errors, permission errors, etc.)
     """
+    batch_req = url.endswith("/$batch")
+
     req_headers = {
         "Authorization": f"Bearer {graph_config.access_token}",
         "Content-Type": "application/json",
@@ -1084,7 +1128,18 @@ def graph_post_resource(  # noqa: PLR0913, PLR0917
     if cache_file_path:
         resp_json = _get_cached_response(cache_file_path, req.url, cache_json_header)
         if resp_json is not None:
+            graph_config.stats.incr(GraphApiStat.GRAPHAPI_STAT_CACHE_HIT)
             return resp_json
+
+        graph_config.stats.incr(GraphApiStat.GRAPHAPI_STAT_CACHE_MISS)
+
+    if graph_config.offline:
+        raise GraphApiOfflineError
+
+    graph_config.stats.incr(GraphApiStat.GRAPHAPI_STAT_POST)
+
+    if batch_req:
+        graph_config.stats.incr(GraphApiStat.GRAPHAPI_STAT_BATCH_GET, incr=len(json_data["requests"]))
 
     with graph_get_resource_lock:
         resp = session.send(req, timeout=GRAPH_API_TIMEOUT)
@@ -1093,7 +1148,7 @@ def graph_post_resource(  # noqa: PLR0913, PLR0917
 
     resp_json = _get_content_as_json(resp)
 
-    if url.endswith("/$batch"):
+    if batch_req:
         _batch_raise_for_status(url, resp, resp_json, json_data)
 
     if cache_file_path:

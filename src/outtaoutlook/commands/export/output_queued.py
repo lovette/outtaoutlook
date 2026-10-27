@@ -157,6 +157,9 @@ class OutputWorkerQueued(OutputWorkerCore):
             item = self._queued_messages.pop(request_id)  # dequeue
             response = responses[request_id]
 
+            if self.export_opts.prime_cache:
+                continue  # only prime the cache, do not write files
+
             content, content_type = response.get("body"), response.get("headers", {}).get("Content-Type")
 
             if content_type != "text/plain":

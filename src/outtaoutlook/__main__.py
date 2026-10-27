@@ -345,6 +345,7 @@ def main(  # noqa: PLR0913, PLR0917
             writable=True,
             help="Write cached files to DIRECTORY.",
             show_default="current working directory",
+            rich_help_panel="Cache options",
             metavar="DIRECTORY",
         ),
     ] = None,
@@ -352,8 +353,17 @@ def main(  # noqa: PLR0913, PLR0917
         bool | None,
         typer.Option(
             help="Cache Graph API responses and use cache when available. Implied if --cache-dir is specified.",
+            rich_help_panel="Cache options",
         ),
     ] = None,
+    offline: Annotated[  # noqa: FBT002
+        bool,
+        typer.Option(
+            "--offline",
+            help="Run in offline mode; do not make any network requests; requires a primed cache.",
+            rich_help_panel="Cache options",
+        ),
+    ] = False,
     verbose: Annotated[
         int,
         typer.Option(
@@ -398,6 +408,10 @@ def main(  # noqa: PLR0913, PLR0917
     else:
         auth_file_path = auth_file.absolute()
 
+    if offline and not graph_cache_enabled:
+        errmsg = "The '--offline' option requires the Graph API cache to be enabled."
+        raise typer.BadParameter(errmsg)
+
     logger.debug("Working directory: '%s'", Path.cwd())
     logger.debug("Configuration file: %s", f"'{config_file_path}'" if config_file_path else "None")
     logger.debug("Auth token file: '%s'", auth_file_path)
@@ -410,6 +424,7 @@ def main(  # noqa: PLR0913, PLR0917
         auth_file_path=auth_file_path,
         cache_dir=cache_dir_abs,
         graph_cache_enabled=graph_cache_enabled,
+        offline=offline,
         verbose=verbose,
     )
 

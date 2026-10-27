@@ -61,6 +61,7 @@ class ExportOptions:
     with_attachments: bool  # Whether to download and link attachments to files.
     max_workers: int  # Maximum number of workers being used for exporting.
     assume_yes: bool  # Automatically confirm all prompts.
+    prime_cache: bool  # Whether to prime the cache without exporting files.
 
 
 ######################################################################

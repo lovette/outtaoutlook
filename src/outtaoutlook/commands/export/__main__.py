@@ -569,6 +569,14 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
             help="Assume 'yes' as answer to all prompts and run non-interactively.",
         ),
     ] = False,
+    prime_cache: Annotated[  # noqa: FBT002
+        bool,
+        typer.Option(
+            "--prime-cache",
+            help="Do not write any files, just prime the cache.",
+            rich_help_panel="Other options",
+        ),
+    ] = False,
     dry_run: Annotated[  # noqa: FBT002
         bool,
         typer.Option(
@@ -644,6 +652,12 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
     if flat and shallow:
         errmsg = "The '--flat' and '--shallow' options cannot be used together."
         raise typer.BadParameter(errmsg)
+    if prime_cache and not common_opts.graph_cache_enabled:
+        errmsg = "The '--prime-cache' option requires the Graph API cache to be enabled."
+        raise typer.BadParameter(errmsg)
+    if prime_cache and common_opts.offline:
+        errmsg = "The '--offline' and '--prime-cache' options cannot be used together."
+        raise typer.BadParameter(errmsg)
 
     try:
         graph_config = get_graph_config(common_opts)
@@ -690,7 +704,7 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         attachments_folder=attachments_folder,
         attachments_mkdir=attachments_mkdir,
         batch_size=batch_size,
-        dry_run=dry_run,
+        dry_run=dry_run or prime_cache,
         filter_query=filter_query,
         filter_test=filter_test,
         manifest_dir=common_opts.cache_dir if use_manifest else None,
@@ -708,6 +722,7 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         with_attachments=with_attachments,
         max_workers=max_workers or MAX_EXPORT_WORKERS,
         assume_yes=assume_yes,
+        prime_cache=prime_cache,
     )
 
     if filter_test:

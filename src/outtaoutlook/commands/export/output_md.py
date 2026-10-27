@@ -423,7 +423,7 @@ class OutputWorkerMarkdown(OutputWorkerCore):
         """
         return super().get_file_path(message).with_suffix(".md")
 
-    def export_write_message(  # noqa: C901, PLR0912
+    def export_write_message(  # noqa: C901, PLR0911, PLR0912
         self: Self,
         message: GraphMessageT,
         file_path: Path,
@@ -532,6 +532,9 @@ class OutputWorkerMarkdown(OutputWorkerCore):
         file_content.append(file_body)
 
         file_text = "\n".join(file_content).strip() + "\n"
+
+        if self.export_opts.prime_cache:
+            return 1  # only prime the cache, do not write files
 
         self.write_output_file(file_path, file_text, file_date)
 

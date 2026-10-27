@@ -6,6 +6,7 @@
 auth_file: "~/outtaoutlook_cache"
 cache_dir: "$TMPDIR/outtaoutlook_cache"
 cache_graph_api: true
+offline: false
 verbose: 3
 
 ############################################
@@ -81,6 +82,7 @@ export:
   shallow: true
   max_workers: 3
   assume_yes: false
+  prime_cache: false
 
   filter:
     - "lastModifiedDateTime ge 2026-01-01"

@@ -63,6 +63,7 @@ class CommonCommandOptions:
     cache_dir: Path | None = None
     graph_cache_enabled: bool = False
     verbose: int = VERBOSE_LOGGING_LEVEL_ERROR
+    offline: bool = False
 
 
 @dataclass

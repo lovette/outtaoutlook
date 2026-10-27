@@ -71,6 +71,9 @@ class OutputWorkerJson(OutputWorkerCore):
 
         file_text = json.dumps(message_copy, sort_keys=True, default=json_serializer)
 
+        if self.export_opts.prime_cache:
+            return 1  # only prime the cache, do not write files
+
         self.write_output_file(file_path, file_text, file_date)
 
         self.export_stats.incr(ExportStat.STAT_MESSAGE_EXPORTED)

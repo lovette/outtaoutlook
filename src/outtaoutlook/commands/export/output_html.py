@@ -106,6 +106,9 @@ class OutputWorkerHtml(OutputWorkerCore):
             if not self.export_opts.with_attachments:
                 return _skip_message(ExportStat.STAT_SKIPPED_NO_MESSAGE_CONTENT_JUST_ATTACHMENTS, logging.INFO)
 
+        if self.export_opts.prime_cache:
+            return 1  # only prime the cache, do not write files
+
         self.write_output_file(file_path, body_content, file_date)
 
         self.export_stats.incr(ExportStat.STAT_MESSAGE_EXPORTED)
