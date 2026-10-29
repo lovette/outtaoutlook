@@ -272,16 +272,18 @@ class OutputWorkerMarkdown(OutputWorkerCore):
     def get_file_path(
         self: Self,
         message: GraphMessageT,
+        suffix: str | None = None,  # noqa: ARG002
     ) -> Path:
         """Generate a prospective path to an output file.
 
         Args:
             message (GraphMessageT): The message.
+            suffix (str | None): Optional file suffix (e.g., ".md", ".eml").
 
         Returns:
             Path
         """
-        return super().get_file_path(message).with_suffix(".md")
+        return super().get_file_path(message, ".md")
 
     def export_write_message(  # noqa: C901, PLR0911, PLR0912
         self: Self,

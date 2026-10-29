@@ -44,16 +44,20 @@ class OutputWorkerHtml(OutputWorkerCore):
     def get_file_path(
         self: Self,
         message: GraphMessageT,
+        suffix: str | None = None,  # noqa: ARG002
     ) -> Path:
         """Generate a prospective path to an output file.
 
         Args:
             message (GraphMessageT): The message.
+            suffix (str | None): Optional file suffix (e.g., ".md", ".eml").
 
         Returns:
             Path
         """
-        return super().get_file_path(message).with_suffix(".html")
+        _, content_type = self._get_message_content(message)
+
+        return super().get_file_path(message, ".html" if content_type == "html" else ".txt")
 
     def export_write_message(
         self: Self,
@@ -82,15 +86,10 @@ class OutputWorkerHtml(OutputWorkerCore):
             return 1
 
         file_date = message["messageDateTime"]
-        body_content: str | None = message.get("body", {}).get("content")
-        content_type: str | None = message.get("body", {}).get("contentType")
+        body_content, content_type = self._get_message_content(message)
         has_attachments: bool | None = message.get("hasAttachments")
 
-        if content_type == "html":
-            file_path = file_path.with_suffix(".html")
-        elif content_type == "text":
-            file_path = file_path.with_suffix(".txt")
-        else:
+        if content_type not in ("html", "text"):
             log_message_notice(message, f"field('contentType'): unexpected type: '{content_type}'")
 
         if not body_content:
@@ -111,3 +110,18 @@ class OutputWorkerHtml(OutputWorkerCore):
         self.export_stats.incr(ExportStat.STAT_MESSAGE_EXPORTED)
 
         return 1
+
+    ######################################################################
+    # Internal methods
+
+    def _get_message_content(self, message: GraphMessageT) -> tuple[str | None, str | None]:
+        """Get the body content and content type of a message.
+
+        Args:
+            message (GraphMessageT): The message.
+
+        Returns:
+            tuple[str, str | None]: (Body content, content type)
+        """
+        body = message.get("body", {})
+        return body.get("content"), body.get("contentType")

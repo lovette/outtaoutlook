@@ -1606,11 +1606,13 @@ class OutputWorkerCore(ABC):
     def get_file_path(
         self: Self,
         message: GraphMessageT,
+        suffix: str | None = None,
     ) -> Path:
         """Generate a prospective path to an output file.
 
         Args:
             message (GraphMessageT): The message.
+            suffix (str | None): Optional file suffix (e.g., ".md", ".eml").
 
         Returns:
             Path
@@ -1618,7 +1620,7 @@ class OutputWorkerCore(ABC):
         title = message["fileTitle"]
         file_date = message["messageDateTime"]
 
-        return unique_file_path(self.export_opts.files_dir / Path(title + ".tbd"), file_date)
+        return unique_file_path(self.export_opts.files_dir / Path(title + (suffix or "")), file_date)
 
     def finalize_export(self: Self) -> int:
         """Called after the last batch of messages for a folder is complete.."""

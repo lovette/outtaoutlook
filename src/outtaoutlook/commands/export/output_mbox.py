@@ -196,11 +196,13 @@ class OutputWorkerMbox(OutputWorkerQueued):
     def get_file_path(
         self: Self,
         message: GraphMessageT,
+        suffix: str | None = None,  # noqa: ARG002
     ) -> Path:
         """Generate a prospective path to an output file.
 
         Args:
             message (GraphMessageT): The message.
+            suffix (str | None): Optional file suffix (e.g., ".md", ".eml").
 
         Returns:
             Path
