@@ -849,7 +849,9 @@ class OutputWorkerCore(ABC):
         Returns:
             dict[str, str]: ("{variable}", "value")
         """
-        tag_vars: dict[str, str] = {}
+        tag_vars: dict[str, str] = {
+            "{message.ooid}": message["ooid"],
+        }
 
         for var_name, dt in (
             ("now", datetime_now()),
@@ -909,7 +911,8 @@ class OutputWorkerCore(ABC):
         """
         value = RE_TITLE_WHITESPACE.sub(" ", value)  # collapse whitespace
         value = "".join(char for char in value if unicodedata.category(char) != "Cc")
-        return Header(value, charset="utf-8", header_name=header).encode()
+        charset = "ascii" if value.isascii() else "utf-8"
+        return Header(value, charset=charset, header_name=header).encode()
 
     def get_mailbox_message(self, message: GraphMessageT, content: bytes) -> mailbox.Message:
         """Generate a mailbox.Message object from raw content and message metadata.

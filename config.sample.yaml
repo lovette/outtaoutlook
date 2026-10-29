@@ -37,6 +37,7 @@ ls:
 # - {folder.folderPath}
 # - {folder.folderPath.parts}
 #
+# - {message.ooid} (property only)
 # - {message.subject} (property only)
 # - {message.[date|sent|received|created|modified].[datetime|date|time|year]}
 #
