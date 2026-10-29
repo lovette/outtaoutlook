@@ -5,17 +5,18 @@ import unicodedata
 from collections.abc import Sequence
 from decimal import Decimal
 from pathlib import Path
-from typing import Self
+from typing import TYPE_CHECKING, Self
 from urllib.parse import unquote
 
 import yaml
 from html_to_markdown import ConversionOptions
 from html_to_markdown import convert as convert_to_markdown
 
-from outtaoutlook.graphapi import GraphMessageT, log_message_notice
-
 from .output_core import ExportStat, OutputWorkerCore
 from .shared import DEFAULT_SELECT_MESSAGE_FIELDS
+
+if TYPE_CHECKING:
+    from outtaoutlook.graphapi import GraphMessageT
 
 ######################################################################
 # Constants
@@ -315,7 +316,7 @@ class OutputWorkerMarkdown(OutputWorkerCore):
 
         def _skip_message(skip_reason: ExportStat, level: int) -> int:
             self.export_stats.incr(skip_reason)
-            log_message_notice(message, skip_reason.value, level)
+            self.emit_log_w_message(message, skip_reason.value, level)
             return 1
 
         assert file_path is not None  # noqa: S101
@@ -330,7 +331,7 @@ class OutputWorkerMarkdown(OutputWorkerCore):
             if content_type == "html":
                 file_body = self._convert_to_markdown(body_content)
             elif content_type != "text":
-                log_message_notice(message, f"field('contentType'): unexpected type: '{content_type}'")
+                self.emit_log_w_message(message, f"field('contentType'): unexpected type: '{content_type}'")
 
         if not file_body:
             if body_content is None:

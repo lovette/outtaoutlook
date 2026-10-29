@@ -11,7 +11,6 @@ from outtaoutlook.graphapi import (
     GRAPH_API_URL,
     GraphMessageT,
     graph_get_resource_batch,
-    log_message_notice,
 )
 from outtaoutlook.shared import VERBOSE_LEVEL_MORE
 
@@ -123,7 +122,7 @@ class OutputWorkerQueued(OutputWorkerCore):
 
         def _skip_message(message: GraphMessageT, skip_reason: ExportStat, level: int) -> int:
             self.export_stats.incr(skip_reason)
-            log_message_notice(message, skip_reason.value, level)
+            self.emit_log_w_message(message, skip_reason.value, level)
             return 1
 
         assert len(self._queued_messages) > 0  # noqa: S101
@@ -170,14 +169,17 @@ class OutputWorkerQueued(OutputWorkerCore):
             content, content_type = response.get("body"), response.get("headers", {}).get("Content-Type")
 
             if content_type != "text/plain":
-                log_message_notice(item.message, f"$batch/messages/id/$value: Unexpected content type: '{content_type}'")
+                self.emit_log_w_message(
+                    item.message,
+                    f"$batch/messages/id/$value: Unexpected content type: '{content_type}'",
+                )
                 content = None
 
             if content:
                 try:
                     content = base64.b64decode(content)
                 except binascii.Error as err:
-                    log_message_notice(
+                    self.emit_log_w_message(
                         item.message,
                         f"$batch/messages/id/$value: Failed to b64decode message content: {err}",
                         logging.ERROR,

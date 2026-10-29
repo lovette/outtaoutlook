@@ -35,7 +35,6 @@ from outtaoutlook.graphapi import (
     GraphFolderT,
     GraphMessageT,
     graph_get_resource,
-    log_message_notice,
 )
 from outtaoutlook.shared import (
     RE_TITLE_WHITESPACE,
@@ -464,7 +463,7 @@ class OutputWorkerCore(ABC):
         """
 
         def _warn_attachment(name: Path, errmsg: str, level: int = logging.WARNING) -> None:
-            log_message_notice(message, f'attachment("{name}"): {errmsg}', level)
+            self.emit_log_w_message(message, f'attachment("{name}"): {errmsg}', level)
 
         def _get_item_expanded_content() -> tuple[dict[str, Any], str | None]:
             # Get properties of the attached contact, event, or message.
@@ -601,7 +600,7 @@ class OutputWorkerCore(ABC):
                     with attachment_path.open("wb") as f:
                         f.write(base64.b64decode(content))
                 except binascii.Error as err:
-                    log_message_notice(
+                    self.emit_log_w_message(
                         message,
                         f'attachment("{attachment_path.name}"): b64decode failed: {err}',
                         logging.ERROR,
@@ -614,7 +613,7 @@ class OutputWorkerCore(ABC):
         self.emit_log(
             f"Wrote attachment to '{attachment_path.name}' ({content_type})"
             + (" (dry run)" if self.export_opts.dry_run else ""),
-            logging.DEBUG,
+            VERBOSE_LEVEL_MORE,
         )
 
         return attachment_path
@@ -683,13 +682,13 @@ class OutputWorkerCore(ABC):
 
                 if not dt:
                     if date_field not in message:
-                        log_message_notice(message, f"field({date_field}): missing date field")
+                        self.emit_log_w_message(message, f"field({date_field}): missing date field")
                     elif is_draft and date_field in {"sentDateTime", "receivedDateTime"}:
                         pass  # Drafts aren't expected to have sent or received dates, we'll set something below
                     elif value:
-                        log_message_notice(message, f"field({date_field}): unexpected date format: '{value}'")
+                        self.emit_log_w_message(message, f"field({date_field}): unexpected date format: '{value}'")
                     else:
-                        log_message_notice(message, f"field({date_field}): no value")
+                        self.emit_log_w_message(message, f"field({date_field}): no value")
 
                 # Ensure all fields are set to a valid datetime
                 message[date_field] = dt or dt_now
@@ -724,7 +723,7 @@ class OutputWorkerCore(ABC):
 
         if not message_id:
             # I don't expect this to ever happen, but just in case.
-            log_message_notice(message, "'id' field is not set!", logging.ERROR)
+            self.emit_log_w_message(message, "'id' field is not set!", logging.ERROR)
             return 1
 
         _fix_dates(message, bool(is_draft))
@@ -743,7 +742,7 @@ class OutputWorkerCore(ABC):
             skip_reason, level = ExportStat.STAT_SKIPPED_EVENT_MESSAGE, logging.DEBUG
             self.export_stats.incr(skip_reason)
             if self.export_opts.verbose > VERBOSE_LEVEL_DEBUG:
-                log_message_notice(message, skip_reason.value, level)
+                self.emit_log_w_message(message, skip_reason.value, level)
             return 1  # don't write empty files
 
         file_path = self.get_file_path(message)
@@ -972,6 +971,24 @@ class OutputWorkerCore(ABC):
 
         if level != VERBOSE_LEVEL_MORE or self.export_opts.verbose > VERBOSE_LEVEL_DEBUG:
             logger.log(level, 'folder("%s"): %s', self.folder_path, errmsg)
+
+    def emit_log_w_message(
+        self,
+        message: GraphMessageT,
+        errmsg: str | Sequence[str | None],
+        level: int = logging.WARNING,
+    ) -> None:
+        """Log a warning related to a message.
+
+        Args:
+            message (GraphMessageT): Message object.
+            errmsg (str | Sequence[str | None]): The error message to log or a sequence of error messages to join.
+            level (int): Logging level code (e.g., logging.WARNING).
+        """
+        if isinstance(errmsg, str):
+            errmsg = [errmsg]
+
+        self.emit_log([f'message("{message["subject"]}"):', *errmsg], level)
 
     def set_failed(self, reason: str | Exception, *, raise_now: bool = False) -> None:
         """Mark the export as failed and update progress bar task status.

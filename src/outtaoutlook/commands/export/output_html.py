@@ -3,13 +3,13 @@
 import logging
 from typing import TYPE_CHECKING, Self
 
-from outtaoutlook.graphapi import GraphMessageT, log_message_notice
-
 from .output_core import ExportStat, OutputWorkerCore
 from .shared import DEFAULT_SELECT_MESSAGE_FIELDS
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from outtaoutlook.graphapi import GraphMessageT
 
 ######################################################################
 # Constants
@@ -89,7 +89,7 @@ class OutputWorkerHtml(OutputWorkerCore):
 
         def _skip_message(skip_reason: ExportStat, level: int) -> int:
             self.export_stats.incr(skip_reason)
-            log_message_notice(message, skip_reason.value, level)
+            self.emit_log_w_message(message, skip_reason.value, level)
             return 1
 
         assert file_path is not None  # noqa: S101
@@ -99,7 +99,7 @@ class OutputWorkerHtml(OutputWorkerCore):
         has_attachments: bool | None = message.get("hasAttachments")
 
         if content_type not in ("html", "text"):
-            log_message_notice(message, f"field('contentType'): unexpected type: '{content_type}'")
+            self.emit_log_w_message(message, f"field('contentType'): unexpected type: '{content_type}'")
 
         if not body_content:
             if body_content is None:

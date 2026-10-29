@@ -4,7 +4,6 @@ import base64
 import binascii
 import hashlib
 import json
-import logging
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -1249,17 +1248,6 @@ def graph_get_resource_batch(  # noqa: PLR0913
             raise
 
     return {resp["id"]: resp for resp in responses}
-
-
-def log_message_notice(message: GraphMessageT, errmsg: str, level: int = logging.WARNING) -> None:
-    """Log a warning related to a message.
-
-    Args:
-        message (GraphMessageT): Message object.
-        errmsg (str): Warning description.
-        level (int): Logging level code (e.g., logging.WARNING).
-    """
-    logger.log(level, 'message("%s"): %s', message["subject"], errmsg)
 
 
 def print_graph_request_exception(console: Console, err: requests.RequestException) -> None:
