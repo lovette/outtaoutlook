@@ -49,6 +49,13 @@ class OutputFormatChoice(StrEnum):
     md = "md"
 
 
+class FilenameSchemeChoice(StrEnum):
+    """Choices for filename scheme."""
+
+    subject = "subject"
+    obscure = "obscure"
+
+
 @dataclass
 class ExportOptions:
     """Export command options."""
@@ -77,6 +84,7 @@ class ExportOptions:
     assume_yes: bool  # Automatically confirm all prompts.
     prime_cache: bool  # Whether to prime the cache without exporting files.
     verbose: int  # Verbosity level (VERBOSE_LEVEL_*)
+    filename_scheme: FilenameSchemeChoice  # Choice for filename scheme.
 
 
 ######################################################################

@@ -40,6 +40,7 @@ from .shared import (
     ATTACHMENTS_FOLDER_ROOT,
     MAX_EXPORT_WORKERS,
     ExportOptions,
+    FilenameSchemeChoice,
     OutputFormatChoice,
 )
 from .worker import export_folders
@@ -553,6 +554,13 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
             help="Number of messages to to fetch in each Graph API request.",
         ),
     ] = GRAPH_API_BATCH_MAX,
+    filename_scheme: Annotated[
+        FilenameSchemeChoice,
+        typer.Option(
+            help="Choice for filename scheme.",
+            rich_help_panel="Other options",
+        ),
+    ] = FilenameSchemeChoice.subject,
     max_workers: Annotated[
         int | None,
         typer.Option(
@@ -725,6 +733,7 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         assume_yes=assume_yes,
         prime_cache=prime_cache,
         verbose=common_opts.verbose,
+        filename_scheme=filename_scheme,
     )
 
     if filter_test:

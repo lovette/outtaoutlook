@@ -55,6 +55,7 @@ from .shared import (
     ATTACHMENTS_FOLDER_FILE,
     ATTACHMENTS_FOLDER_ROOT,
     ExportOptions,
+    FilenameSchemeChoice,
     json_serializer,
 )
 
@@ -1636,6 +1637,10 @@ class OutputWorkerCore(ABC):
         """
         title = message["fileTitle"]
         file_date = message["messageDateTime"]
+
+        if self.export_opts.filename_scheme == FilenameSchemeChoice.obscure:
+            ts = file_date.timestamp()
+            title = f"{int(ts)}_{message['ooid']}"
 
         return unique_file_path(self.export_opts.files_dir / Path(title + (suffix or "")), file_date)
 
