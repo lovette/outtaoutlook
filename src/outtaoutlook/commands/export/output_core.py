@@ -752,7 +752,7 @@ class OutputWorkerCore(ABC):
         if has_attachments and self.export_opts.with_attachments:
             attachment_paths = self._save_attachments(
                 message,
-                file_path.stem,
+                self.get_attachments_prefix(message, file_path),
                 file_date,
             )
 
@@ -1353,14 +1353,14 @@ class OutputWorkerCore(ABC):
     def export_write_message(
         self: Self,
         message: GraphMessageT,
-        file_path: Path,
+        file_path: Path | None,
         attachment_paths: list[Path] | None,
     ) -> int:
         """Write a message to a file.
 
         Args:
             message (GraphMessageT): The message.
-            file_path (Path): Prospective path to the output file to write.
+            file_path (Path | None): Prospective path to the output file to write.
             attachment_paths (list[Path] | None): List of attachment file paths or None if no attachments.
 
         Returns:
@@ -1607,7 +1607,7 @@ class OutputWorkerCore(ABC):
         self: Self,
         message: GraphMessageT,
         suffix: str | None = None,
-    ) -> Path:
+    ) -> Path | None:
         """Generate a prospective path to an output file.
 
         Args:
@@ -1615,12 +1615,29 @@ class OutputWorkerCore(ABC):
             suffix (str | None): Optional file suffix (e.g., ".md", ".eml").
 
         Returns:
-            Path
+            Path | None
         """
         title = message["fileTitle"]
         file_date = message["messageDateTime"]
 
         return unique_file_path(self.export_opts.files_dir / Path(title + (suffix or "")), file_date)
+
+    def get_attachments_prefix(
+        self: Self,
+        message: GraphMessageT,  # noqa: ARG002
+        file_path: Path | None,
+    ) -> str:
+        """Generate a prefix for attachment files related to a message.
+
+        Args:
+            message (GraphMessageT): The message.
+            file_path (Path | None): The path to the output file.
+
+        Returns:
+            str
+        """
+        assert isinstance(file_path, Path)  # noqa: S101
+        return file_path.stem
 
     def finalize_export(self: Self) -> int:
         """Called after the last batch of messages for a folder is complete.."""

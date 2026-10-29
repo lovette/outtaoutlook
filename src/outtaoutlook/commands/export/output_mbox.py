@@ -178,10 +178,12 @@ class OutputWorkerMbox(OutputWorkerQueued):
 
         self.mbox_path = mbox_dir / (mbox_name + ".mbox")
 
-        # We don't export attachments
-        if self.export_opts.with_attachments:
-            self.emit_log("Attachments will not be exported for .mbox output.")
+        if self.export_opts.with_attachments is None:
+            # Only export attachments when explicitly asked
             self.export_opts.with_attachments = False
+
+        # Ensure that the attachments directory is created if attachments are being exported.
+        self.export_opts.attachments_mkdir = self.export_opts.with_attachments
 
     def update_messages_params(self: Self, params: dict[str, str | int]) -> None:
         """Update parameters used in the '/messages' Graph API request.
@@ -195,9 +197,9 @@ class OutputWorkerMbox(OutputWorkerQueued):
 
     def get_file_path(
         self: Self,
-        message: GraphMessageT,
+        message: GraphMessageT,  # noqa: ARG002
         suffix: str | None = None,  # noqa: ARG002
-    ) -> Path:
+    ) -> Path | None:
         """Generate a prospective path to an output file.
 
         Args:
@@ -205,9 +207,26 @@ class OutputWorkerMbox(OutputWorkerQueued):
             suffix (str | None): Optional file suffix (e.g., ".md", ".eml").
 
         Returns:
-            Path
+            Path | None
         """
-        return super().get_file_path(message)
+        return None
+
+    def get_attachments_prefix(
+        self: Self,
+        message: GraphMessageT,
+        file_path: Path | None,  # noqa: ARG002
+    ) -> str:
+        """Generate a prefix for attachment files related to a message.
+
+        Args:
+            message (GraphMessageT): The message.
+            file_path (Path | None): The path to the output file.
+
+        Returns:
+            str
+        """
+        ts = message["messageDateTime"].timestamp()
+        return f"{int(ts)}_{message['ooid']}"
 
     def prepare_export(self) -> None:
         """Prepare to export messages."""
@@ -285,14 +304,14 @@ class OutputWorkerMbox(OutputWorkerQueued):
         self: Self,
         message: GraphMessageT,
         mb_message: mailbox.Message,
-        file_path: Path,  # noqa: ARG002
+        file_path: Path | None,
     ) -> int:
         """Export a message to an .mbox file.
 
         Args:
             message (GraphMessageT): The message.
             mb_message (mailbox.Message): The mailbox message object.
-            file_path (Path): The path to the output file.
+            file_path (Path | None): The path to the output file.
 
         Returns:
             int: The number of messages processed. Typically 1, but can be 0 if queued for later and >0 when processed.
@@ -300,6 +319,8 @@ class OutputWorkerMbox(OutputWorkerQueued):
         Raises:
             OSError derived error (e.g. file system errors, permission errors, etc.)
         """
+        assert file_path is None  # noqa: S101
+
         if self._mbox is None:
             msg = "Failed to write message to mbox: .mbox is not initialized"
             raise ValueError(msg)

@@ -491,14 +491,14 @@ def export(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
             help="Use only the leaf (last) folder when creating mail folder hierarchy.",
         ),
     ] = False,
-    with_attachments: Annotated[  # noqa: FBT002
-        bool,
+    with_attachments: Annotated[
+        bool | None,
         typer.Option(
             "--attachments/--no-attachments",
-            help="Download and link attachments to file.",
+            help="Download message attachments.",
             rich_help_panel="Attachments",
         ),
-    ] = True,
+    ] = None,
     attachments_folder: Annotated[
         str,
         typer.Option(

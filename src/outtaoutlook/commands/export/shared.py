@@ -72,7 +72,7 @@ class ExportOptions:
     md_place_tags_frontmatter: bool  # True to place non-body tags in frontmatter.
     search_query: str | None  # --search criteria from command line and config file.
     root_out_dir: Path  # Root output directory (set by user.)
-    with_attachments: bool  # Whether to download and link attachments to files.
+    with_attachments: bool | None  # Download message attachments. None to use whatever makes sense for output format.
     max_workers: int  # Maximum number of workers being used for exporting.
     assume_yes: bool  # Automatically confirm all prompts.
     prime_cache: bool  # Whether to prime the cache without exporting files.

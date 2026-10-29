@@ -261,6 +261,13 @@ class OutputWorkerMarkdown(OutputWorkerCore):
     ######################################################################
     # Overridden methods
 
+    def update_export_opts(self) -> None:
+        """Set and optionally update export options for messages in the current folder."""
+        super().update_export_opts()
+
+        if self.export_opts.with_attachments is None:
+            self.export_opts.with_attachments = True
+
     def update_messages_params(self: Self, params: dict[str, str | int]) -> None:
         """Update parameters used in the '/messages' Graph API request.
 
@@ -273,7 +280,7 @@ class OutputWorkerMarkdown(OutputWorkerCore):
         self: Self,
         message: GraphMessageT,
         suffix: str | None = None,  # noqa: ARG002
-    ) -> Path:
+    ) -> Path | None:
         """Generate a prospective path to an output file.
 
         Args:
@@ -281,14 +288,14 @@ class OutputWorkerMarkdown(OutputWorkerCore):
             suffix (str | None): Optional file suffix (e.g., ".md", ".eml").
 
         Returns:
-            Path
+            Path | None
         """
         return super().get_file_path(message, ".md")
 
     def export_write_message(  # noqa: C901, PLR0911, PLR0912
         self: Self,
         message: GraphMessageT,
-        file_path: Path,
+        file_path: Path | None,
         attachment_paths: list[Path] | None,
     ) -> int:
         """Export a message as a Markdown file.
@@ -310,6 +317,8 @@ class OutputWorkerMarkdown(OutputWorkerCore):
             self.export_stats.incr(skip_reason)
             log_message_notice(message, skip_reason.value, level)
             return 1
+
+        assert file_path is not None  # noqa: S101
 
         file_date = message["messageDateTime"]
         body_content: str | None = message.get("body", {}).get("content")

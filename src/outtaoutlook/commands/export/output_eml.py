@@ -41,6 +41,10 @@ class OutputWorkerEml(OutputWorkerQueued):
 
         self.convert_meta_props_to_xheaders()
 
+        if self.export_opts.with_attachments is None:
+            # Only export attachments when explicitly asked
+            self.export_opts.with_attachments = False
+
     def update_messages_params(self: Self, params: dict[str, str | int]) -> None:
         """Update parameters used in the '/messages' Graph API request.
 
@@ -55,7 +59,7 @@ class OutputWorkerEml(OutputWorkerQueued):
         self: Self,
         message: GraphMessageT,
         suffix: str | None = None,  # noqa: ARG002
-    ) -> Path:
+    ) -> Path | None:
         """Generate a prospective path to an output file.
 
         Args:
@@ -63,7 +67,7 @@ class OutputWorkerEml(OutputWorkerQueued):
             suffix (str | None): Optional file suffix (e.g., ".md", ".eml").
 
         Returns:
-            Path
+            Path | None
         """
         return super().get_file_path(message, ".eml")
 
@@ -71,14 +75,14 @@ class OutputWorkerEml(OutputWorkerQueued):
         self: Self,
         message: GraphMessageT,
         mb_message: mailbox.Message,
-        file_path: Path,
+        file_path: Path | None,
     ) -> int:
         """Export a message as a raw .eml file.
 
         Args:
             message (GraphMessageT): The message.
             mb_message (mailbox.Message): The mailbox message object.
-            file_path (Path): The path to the output file.
+            file_path (Path | None): The path to the output file.
 
         Returns:
             int: The number of messages processed. Typically 1, but can be 0 if queued for later and >0 when processed.
@@ -86,6 +90,8 @@ class OutputWorkerEml(OutputWorkerQueued):
         Raises:
             OSError derived error (e.g. file system errors, permission errors, etc.)
         """
+        assert file_path is not None  # noqa: S101
+
         file_date = message["messageDateTime"]
 
         self.write_output_file(file_path, mb_message.as_bytes(), file_date)

@@ -37,7 +37,7 @@ class MessageQueueItemT:
     """Items in the message export queue."""
 
     message: GraphMessageT
-    file_path: Path
+    file_path: Path | None
     attachment_paths: list[Path] | None
 
 
@@ -65,14 +65,14 @@ class OutputWorkerQueued(OutputWorkerCore):
     def export_write_message(
         self: Self,
         message: GraphMessageT,
-        file_path: Path,
+        file_path: Path | None,
         attachment_paths: list[Path] | None,
     ) -> int:
         """Export a message as a file.
 
         Args:
             message (GraphMessageT): The message.
-            file_path (Path): Prospective path to the output file to write.
+            file_path (Path | None): Prospective path to the output file to write.
             attachment_paths (list[Path] | None): List of attachment file paths or None if no attachments.
 
         Returns:
@@ -206,14 +206,14 @@ class OutputWorkerQueued(OutputWorkerCore):
         self: Self,
         message: GraphMessageT,
         mb_message: mailbox.Message,
-        file_path: Path,
+        file_path: Path | None,
     ) -> int:
         """Export a message to a file.
 
         Args:
             message (GraphMessageT): The message.
             mb_message (mailbox.Message): The mailbox message object.
-            file_path (Path): The path to the output file.
+            file_path (Path | None): The path to the output file.
 
         Returns:
             int: The number of messages processed. Typically 1, but can be 0 if queued for later and >0 when processed.

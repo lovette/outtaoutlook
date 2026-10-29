@@ -19,6 +19,13 @@ if TYPE_CHECKING:
 class OutputWorkerJson(OutputWorkerCore):
     """Implements the `OutputWorkerCore` for JSON output."""
 
+    def update_export_opts(self) -> None:
+        """Set and optionally update export options for messages in the current folder."""
+        super().update_export_opts()
+
+        if self.export_opts.with_attachments is None:
+            self.export_opts.with_attachments = True
+
     def update_messages_params(self: Self, params: dict[str, str | int]) -> None:
         """Update parameters used in the '/messages' Graph API request.
 
@@ -31,7 +38,7 @@ class OutputWorkerJson(OutputWorkerCore):
         self: Self,
         message: GraphMessageT,
         suffix: str | None = None,  # noqa: ARG002
-    ) -> Path:
+    ) -> Path | None:
         """Generate a prospective path to an output file.
 
         Args:
@@ -39,14 +46,14 @@ class OutputWorkerJson(OutputWorkerCore):
             suffix (str | None): Optional file suffix (e.g., ".md", ".eml").
 
         Returns:
-            Path
+            Path | None
         """
         return super().get_file_path(message, ".json")
 
     def export_write_message(
         self: Self,
         message: GraphMessageT,
-        file_path: Path,
+        file_path: Path | None,
         attachment_paths: list[Path] | None,  # noqa: ARG002
     ) -> int:
         """Export a message as a JSON file.
@@ -63,6 +70,8 @@ class OutputWorkerJson(OutputWorkerCore):
             requests.RequestException derived error (e.g. ConnectionError, JSONDecodeError, HTTPError, etc.)
             OSError derived error (e.g. file system errors, permission errors, etc.)
         """
+        assert file_path is not None  # noqa: S101
+
         file_date = message["messageDateTime"]
 
         message_copy = message.copy()
