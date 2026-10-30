@@ -163,10 +163,6 @@ def auth(
 
     auth_file_path = ctx_obj.common_opts.auth_file_path
 
-    if not auth_file_path:
-        err_console.print("Internal error: Authentication file path is not set.")
-        raise typer.Exit(1)
-
     if info:
         try:
             _auth_info(auth_file_path)

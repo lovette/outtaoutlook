@@ -706,10 +706,6 @@ def get_graph_config(common_opts: CommonCommandOptions) -> GraphApiConfig:
         GraphAuthRequiredError: Raised if access token is missing or invalid.
         GraphApiError: MSAL-related error, such as an invalid MSAL environment or invalid token cache.
     """
-    if not common_opts.auth_file_path:
-        errmsg = "Internal error: Authentication file path is not set."
-        raise GraphApiError(errmsg)
-
     # First see if there is cached authentication information.
     token_info = get_token_cache_info(common_opts.auth_file_path)
     if not token_info:

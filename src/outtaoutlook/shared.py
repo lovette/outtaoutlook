@@ -21,6 +21,7 @@ from rich.console import Console
 
 APP_NAME = "outtaoutlook"
 TITLE_MAXLEN = 255 - 25  # macOS limit minus a few characters for whatever `unique_file_path` tacks on
+TOKEN_CACHE_FILE_NAME = f".{APP_NAME}_msal_auth.json"
 
 # These are banned outright: \/:
 # Links do not work if title includes: #^[]|
@@ -64,7 +65,7 @@ FileMetaPropT = dict[str, str | int | Sequence[str | int]]
 class CommonCommandOptions:
     """Common command options."""
 
-    auth_file_path: Path | None = None
+    auth_file_path: Path
     cache_dir: Path | None = None
     graph_cache_enabled: bool = False
     verbose: int = VERBOSE_LEVEL_ERROR
@@ -83,7 +84,7 @@ class CommandContext:
     export_metaprops: FileMetaPropT | None = None  # set if export command has `--metaprop` options
 
     def __post_init__(self) -> None:  # noqa: D105
-        self.common_opts = CommonCommandOptions()
+        self.common_opts = CommonCommandOptions(auth_file_path=Path.cwd() / TOKEN_CACHE_FILE_NAME)
 
 
 ######################################################################

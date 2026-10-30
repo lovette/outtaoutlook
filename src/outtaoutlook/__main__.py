@@ -12,12 +12,11 @@ import typer
 import yaml
 
 from .commands import auth_app, export_app, ls_app
-from .shared import APP_NAME, VERBOSE_LEVEL_ERROR, CommandContext, console, path_with_vars
+from .shared import APP_NAME, TOKEN_CACHE_FILE_NAME, VERBOSE_LEVEL_ERROR, CommandContext, console, path_with_vars
 
 if TYPE_CHECKING:
     from io import TextIOWrapper
 
-TOKEN_CACHE_FILE_NAME = f".{APP_NAME}_msal_auth.json"
 CONFIG_FILE_NAME = f"{APP_NAME}_config.yaml"
 
 ######################################################################
