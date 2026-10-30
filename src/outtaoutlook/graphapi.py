@@ -48,9 +48,11 @@ GRAPH_API_CONCURRENT_LIMIT = 4
 
 AUTH_ERROR_USECOMMAND = "Use the 'auth' command to sign in and grant access."
 AUTH_REQUIRED_ERROR = "Access to Microsoft Outlook via the Microsoft Graph API is required."
+AUTH_REQUIRED_OFFLINE = "Authentication cannot be performed in offline mode."
 AUTH_EXPIRED_ERROR = "Previously granted access to Microsoft Outlook has expired."
 AUTH_FAILED_ERROR = "Access to Microsoft Outlook was not granted."
-AUTH_NO_CACHE_ERROR = "Access to Microsoft Outlook has not been granted."
+AUTH_CACHE_NOT_FOUND = "Access to Microsoft Outlook has not been granted."
+AUTH_CACHE_NOT_VALID = "Authentication token file is not valid."
 
 GRAPH_ACCESS_TOKEN_FIELDS = (
     "access_token",
@@ -228,12 +230,22 @@ class CachedAccessTokenInfo:
 class GraphApiConfig:
     """Configuration for HTTP caching."""
 
-    access_token: str
+    access_token: str | None  # Will be None if offline and using cached auth
     cache_dir: Path | None
     cache_enabled: bool
     offline: bool
     token_info: CachedAccessTokenInfo
     stats: GraphApiStatsT = field(default_factory=GraphApiStatsT)
+
+
+@dataclass
+class GraphApiClient:
+    """Graph API access details."""
+
+    app: msal.PublicClientApplication
+    cache: msal.SerializableTokenCache
+    account: GraphAccountT | None  # None if not authenticated yet
+    token: GraphAccessTokenT | None  # None if not authenticated yet
 
 
 ######################################################################
@@ -247,8 +259,10 @@ class GraphApiError(ExportError):
 class GraphApiOfflineError(GraphApiError):
     """Raised when a Graph API request is attempted in offline mode."""
 
-    def __init__(self) -> None:  # noqa: D107
-        super().__init__("Graph API request attempted in offline mode.")
+    def __init__(self, errmsg: str | None = None) -> None:  # noqa: D107
+        if errmsg is None:
+            errmsg = "Graph API request attempted in offline mode."
+        super().__init__(errmsg)
 
 
 class GraphEmptyRootFolderError(GraphApiError):
@@ -261,6 +275,28 @@ class GraphFolderNotFoundError(GraphApiError):
 
 class GraphAuthRequiredError(GraphApiError):
     """Raised when user authentication is required."""
+
+
+class GraphAuthCacheError(GraphApiError):
+    """Raised when there is an issue with the authentication cache."""
+
+
+class GraphAuthCacheNotValidError(GraphAuthCacheError):
+    """Raised when user authentication is required."""
+
+    def __init__(self, errmsg: str | None = None) -> None:  # noqa: D107
+        if errmsg is None:
+            errmsg = AUTH_CACHE_NOT_VALID
+        super().__init__(errmsg)
+
+
+class GraphAuthCacheNotFoundError(GraphAuthCacheError):
+    """Raised when the authentication cache is not found."""
+
+    def __init__(self, errmsg: str | None = None) -> None:  # noqa: D107
+        if errmsg is None:
+            errmsg = AUTH_CACHE_NOT_FOUND
+        super().__init__(errmsg)
 
 
 ######################################################################
@@ -525,17 +561,21 @@ def _batch_raise_for_status(  # noqa: C901
 # Public functions
 
 
-def get_token_cache_info(common_opts: CommonCommandOptions) -> CachedAccessTokenInfo | None:
-    """Retrieve information from the token cache if it exists.
+def get_token_cache_info(common_opts: CommonCommandOptions) -> CachedAccessTokenInfo:
+    """Retrieve information from the MSAL authentication token cache if it exists.
 
     Returns:
-        TokenCacheInfo | None: Information about the cached token, or None if no valid cache is found.
+        CachedAccessTokenInfo: Information about the cached token.
+
+    Raises:
+        GraphAuthCacheNotFoundError: If the token cache is not found.
+        GraphAuthCacheNotValidError: If the token cache is missing expected fields.
     """
     auth_file_path = common_opts.auth_file_path
 
     if not auth_file_path.is_file():
         logger.debug("Access token is not cached (looking for '%s')", auth_file_path)
-        return None
+        raise GraphAuthCacheNotFoundError
 
     cache_text = auth_file_path.read_text()
     cache_json = json.loads(cache_text)
@@ -544,19 +584,19 @@ def get_token_cache_info(common_opts: CommonCommandOptions) -> CachedAccessToken
     token_uuid = next(iter(cache_json.get("AccessToken", {})), None)
     if not token_uuid:
         logger.warning("Access token cache exists but is missing expected field 'AccessToken'.")
-        return None
+        raise GraphAuthCacheNotValidError
 
     # We're interested in the first key/value pair
     account_uuid = next(iter(cache_json.get("Account", {})), None)
     if not account_uuid:
         logger.warning("Access token cache exists but is missing expected field 'Account'.")
-        return None
+        raise GraphAuthCacheNotValidError
 
     # We're interested in the first key/value pair
     metadata_uuid = next(iter(cache_json.get("AppMetadata", {})), None)
     if not metadata_uuid:
         logger.warning("Access token cache exists but is missing expected field 'AppMetadata'.")
-        return None
+        raise GraphAuthCacheNotValidError
 
     access_token: GraphCachedTokenT = cache_json["AccessToken"][token_uuid]
     account_info: GraphAccountT = cache_json["Account"][account_uuid]
@@ -601,13 +641,8 @@ def get_graph_client(  # noqa: C901, PLR0912
     tenant: str | None = None,
     client: str | None = None,
     *,
-    use_cache: bool = True,
-) -> tuple[
-    msal.PublicClientApplication,
-    msal.SerializableTokenCache,
-    GraphAccountT | None,
-    GraphAccessTokenT | None,
-]:
+    reauth: bool = False,
+) -> GraphApiClient:
     """Create client application and token cache along with authenticated user and token if possible.
 
     Account and token are returned only if token cache exists and is being used.
@@ -619,22 +654,33 @@ def get_graph_client(  # noqa: C901, PLR0912
             If not provided, it will be inferred from the cached token if available, otherwise 'login.microsoftonline.com'.
         tenant (str, optional): Tenant ID. If not provided, it will be inferred from the cached token if available.
         client (str, optional): Client ID. If not provided, it will be inferred from the cached token if available.
-        use_cache (bool, optional): Whether to use cached tokens. Defaults to True.
+        reauth (bool, optional): Whether to force re-authentication even if a valid token is cached. Defaults to False.
 
     Returns:
-        tuple[msal.PublicClientApplication, msal.SerializableTokenCache, GraphAccountT | None, GraphAccessTokenT | None]
+        GraphApiClient
 
     Raises:
+        GraphAuthCacheError: Authentication token cache does not exist or is invalid.
         GraphAuthRequiredError: Cache is being used and access token is unavailable or invalid.
+        GraphApiOfflineError: Raised when the client is in offline mode and cannot authenticate.
         GraphApiError: MSAL-related error, such as an invalid MSAL environment or invalid token cache.
     """
     account = None
     token = None
     auth_file_path = common_opts.auth_file_path
     cache = msal.SerializableTokenCache()
-    cache_info = get_token_cache_info(auth_file_path)
+    cache_info = None
 
-    if use_cache and cache_info is not None:
+    if reauth and auth_file_path.is_file():
+        # Reset cache
+        auth_file_path.unlink()
+
+    try:
+        cache_info = get_token_cache_info(common_opts)
+    except GraphAuthCacheNotFoundError:
+        if not (tenant or client):
+            raise
+    else:
         cache_text = auth_file_path.read_text()
         cache.deserialize(cache_text)
 
@@ -645,11 +691,6 @@ def get_graph_client(  # noqa: C901, PLR0912
         if not client:
             client = cache_info.client
 
-    elif auth_file_path.is_file():
-        # Reset cache
-        auth_file_path.unlink()
-        cache_info = None
-
     if not environment:
         environment = AUTHORITY_ENVIRONMENT_DEFAULT
 
@@ -658,13 +699,18 @@ def get_graph_client(  # noqa: C901, PLR0912
             raise GraphAuthRequiredError(AUTH_EXPIRED_ERROR)
         raise GraphAuthRequiredError(AUTH_REQUIRED_ERROR)
 
-    app = msal.PublicClientApplication(
-        client_id=client,
-        authority=f"https://{environment}/{tenant}",
-        token_cache=cache,
-    )
+    if common_opts.offline:
+        raise GraphAuthRequiredError(AUTH_REQUIRED_OFFLINE)
+
+    authority = f"https://{environment}/{tenant}"
+
+    logger.debug("Acquiring access token with authority '%s'.", authority)
+
+    app = msal.PublicClientApplication(client_id=client, authority=authority, token_cache=cache)
 
     if cache_info:
+        # Access was previously granted so we will acquire a valid access token using cached credentials.
+
         # List previously authenticated user accounts.
         accounts = app.get_accounts()
 
@@ -696,31 +742,37 @@ def get_graph_client(  # noqa: C901, PLR0912
                 "', '".join(sorted(missing_fields)),
             )
 
-    return app, cache, account, token
+    return GraphApiClient(app=app, cache=cache, account=account, token=token)
 
 
 def get_graph_config(common_opts: CommonCommandOptions) -> GraphApiConfig:
     """Get cached Graph API configuration details including access token from the MSAL cache.
 
+    In offline mode, an exception will be raised if the authentication cache is not found or is invalid.
+
     Returns:
         GraphApiConfig: Graph API configuration.
 
     Raises:
+        GraphAuthCacheError: If the authentication token cache is not found or is invalid.
         GraphAuthRequiredError: Raised if access token is missing or invalid.
         GraphApiError: MSAL-related error, such as an invalid MSAL environment or invalid token cache.
     """
-    # First see if there is cached authentication information.
+    # First get cached authentication information.
     token_info = get_token_cache_info(common_opts)
-    if not token_info:
-        raise GraphAuthRequiredError(AUTH_REQUIRED_ERROR)
 
-    # Try to acquire a valid access token using cached credentials.
-    _, _, _, token = get_graph_client(common_opts, use_cache=True)
-    if not token or "access_token" not in token:
-        raise GraphAuthRequiredError(AUTH_EXPIRED_ERROR)
+    # If not offline, acquire a valid access token using cached credentials.
+    if not common_opts.offline:
+        graph_client = get_graph_client(common_opts)
+        if not graph_client.token:
+            raise GraphAuthRequiredError(AUTH_EXPIRED_ERROR)
+        access_token = graph_client.token["access_token"]
+    else:
+        logger.debug("Offline mode enabled, access token will not be acquired.")
+        access_token = None
 
     return GraphApiConfig(
-        access_token=token["access_token"],
+        access_token=access_token,
         cache_enabled=common_opts.graph_cache_enabled,
         cache_dir=common_opts.cache_dir,
         offline=common_opts.offline,

@@ -7,9 +7,9 @@ import typer
 
 from outtaoutlook.graphapi import (
     AUTH_ERROR_USECOMMAND,
-    AUTH_NO_CACHE_ERROR,
     GRAPH_SCOPES,
     GraphApiError,
+    GraphAuthCacheNotFoundError,
     GraphAuthRequiredError,
     get_graph_client,
     get_token_cache_info,
@@ -48,15 +48,17 @@ def _raise_if_error(errmsg: str, result: dict | None) -> None:
 
 
 def _auth_info(common_opts: CommonCommandOptions) -> None:
-    # First, see if access was previously granted and cached.
-    cache_info = get_token_cache_info(common_opts)
-    if not cache_info:
-        console.print(AUTH_NO_CACHE_ERROR)
-        raise typer.Exit
-
-    # If cache exists, see if cached tokens are valid.
     try:
-        get_graph_client(common_opts, use_cache=True)
+        # First, see if access was previously granted and cached.
+        cache_info = get_token_cache_info(common_opts)
+    except GraphAuthCacheNotFoundError as err:
+        console.print(err)
+        raise typer.Exit from err
+
+    try:
+        if not common_opts.offline:
+            # Acquire a valid access token using cached credentials.
+            get_graph_client(common_opts)
     except GraphAuthRequiredError as err:
         console.print(err)
         raise typer.Exit from err
@@ -73,12 +75,17 @@ def _auth_init(common_opts: CommonCommandOptions, tenant: str | None, client: st
     accounts = None
     auth_file_path = common_opts.auth_file_path
 
-    app, cache, account, token = get_graph_client(
+    graph_client = get_graph_client(
         common_opts,
         tenant=tenant,
         client=client,
-        use_cache=not force,
+        reauth=force,
     )
+
+    app = graph_client.app
+    token = graph_client.token
+    cache = graph_client.cache
+    account = graph_client.account
 
     if not token:
         # 1. Initiate the user authentication browser flow
