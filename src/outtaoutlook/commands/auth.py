@@ -1,7 +1,6 @@
 """outtaoutlook auth command."""
 
-from pathlib import Path
-from typing import TYPE_CHECKING, Annotated
+from typing import Annotated
 
 import requests
 import typer
@@ -17,13 +16,11 @@ from outtaoutlook.graphapi import (
 )
 from outtaoutlook.shared import (
     CommandContext,
+    CommonCommandOptions,
     console,
     err_console,
     logger,
 )
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 app = typer.Typer(add_completion=False)
 
@@ -50,16 +47,16 @@ def _raise_if_error(errmsg: str, result: dict | None) -> None:
         raise GraphApiError(errmsg)
 
 
-def _auth_info(auth_file_path: Path) -> None:
+def _auth_info(common_opts: CommonCommandOptions) -> None:
     # First, see if access was previously granted and cached.
-    cache_info = get_token_cache_info(auth_file_path)
+    cache_info = get_token_cache_info(common_opts)
     if not cache_info:
         console.print(AUTH_NO_CACHE_ERROR)
         raise typer.Exit
 
     # If cache exists, see if cached tokens are valid.
     try:
-        get_graph_client(auth_file_path, use_cache=True)
+        get_graph_client(common_opts, use_cache=True)
     except GraphAuthRequiredError as err:
         console.print(err)
         raise typer.Exit from err
@@ -71,12 +68,13 @@ def _auth_info(auth_file_path: Path) -> None:
     console.print(f"Cached at: {cache_info.cached_at}")
 
 
-def _auth_init(tenant: str | None, client: str | None, auth_file_path: Path, *, force: bool) -> None:
+def _auth_init(common_opts: CommonCommandOptions, tenant: str | None, client: str | None, *, force: bool) -> None:
     token = None
     accounts = None
+    auth_file_path = common_opts.auth_file_path
 
     app, cache, account, token = get_graph_client(
-        auth_file_path,
+        common_opts,
         tenant=tenant,
         client=client,
         use_cache=not force,
@@ -161,11 +159,11 @@ def auth(
     assert ctx_obj is not None  # noqa: S101
     assert isinstance(ctx_obj, CommandContext)  # noqa: S101
 
-    auth_file_path = ctx_obj.common_opts.auth_file_path
+    common_opts = ctx_obj.common_opts
 
     if info:
         try:
-            _auth_info(auth_file_path)
+            _auth_info(common_opts)
         except requests.RequestException as err:
             err_console.print(f"Error: {err}")
             raise typer.Exit(code=1) from err
@@ -177,7 +175,7 @@ def auth(
             raise typer.Exit(code=1) from err
     else:
         try:
-            _auth_init(tenant, client, auth_file_path, force=force)
+            _auth_init(common_opts, tenant, client, force=force)
         except requests.RequestException as err:
             err_console.print(f"Error: {err}")
             raise typer.Exit(code=1) from err

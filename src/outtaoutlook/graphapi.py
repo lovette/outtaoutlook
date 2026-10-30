@@ -525,12 +525,14 @@ def _batch_raise_for_status(  # noqa: C901
 # Public functions
 
 
-def get_token_cache_info(auth_file_path: Path) -> CachedAccessTokenInfo | None:
+def get_token_cache_info(common_opts: CommonCommandOptions) -> CachedAccessTokenInfo | None:
     """Retrieve information from the token cache if it exists.
 
     Returns:
         TokenCacheInfo | None: Information about the cached token, or None if no valid cache is found.
     """
+    auth_file_path = common_opts.auth_file_path
+
     if not auth_file_path.is_file():
         logger.debug("Access token is not cached (looking for '%s')", auth_file_path)
         return None
@@ -594,7 +596,7 @@ def get_token_cache_info(auth_file_path: Path) -> CachedAccessTokenInfo | None:
 
 
 def get_graph_client(  # noqa: C901, PLR0912
-    auth_file_path: Path,
+    common_opts: CommonCommandOptions,
     environment: str | None = None,
     tenant: str | None = None,
     client: str | None = None,
@@ -612,7 +614,7 @@ def get_graph_client(  # noqa: C901, PLR0912
     Token cache is not updated.
 
     Args:
-        auth_file_path (Path): Path to the token cache file.
+        common_opts (CommonCommandOptions): Common command options.
         environment (str, optional): Typically the domain of the Azure AD instance.
             If not provided, it will be inferred from the cached token if available, otherwise 'login.microsoftonline.com'.
         tenant (str, optional): Tenant ID. If not provided, it will be inferred from the cached token if available.
@@ -628,6 +630,7 @@ def get_graph_client(  # noqa: C901, PLR0912
     """
     account = None
     token = None
+    auth_file_path = common_opts.auth_file_path
     cache = msal.SerializableTokenCache()
     cache_info = get_token_cache_info(auth_file_path)
 
@@ -707,12 +710,12 @@ def get_graph_config(common_opts: CommonCommandOptions) -> GraphApiConfig:
         GraphApiError: MSAL-related error, such as an invalid MSAL environment or invalid token cache.
     """
     # First see if there is cached authentication information.
-    token_info = get_token_cache_info(common_opts.auth_file_path)
+    token_info = get_token_cache_info(common_opts)
     if not token_info:
         raise GraphAuthRequiredError(AUTH_REQUIRED_ERROR)
 
     # Try to acquire a valid access token using cached credentials.
-    _, _, _, token = get_graph_client(common_opts.auth_file_path, use_cache=True)
+    _, _, _, token = get_graph_client(common_opts, use_cache=True)
     if not token or "access_token" not in token:
         raise GraphAuthRequiredError(AUTH_EXPIRED_ERROR)
 
