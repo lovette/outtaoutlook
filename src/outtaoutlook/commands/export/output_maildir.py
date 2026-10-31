@@ -273,9 +273,6 @@ class OutputWorkerMaildir(OutputWorkerQueued):
             # Only export attachments when explicitly asked
             self.export_opts.with_attachments = False
 
-        # Ensure that the attachments directory is created if attachments are being exported.
-        self.export_opts.attachments_mkdir = self.export_opts.with_attachments
-
     def update_messages_params(self: Self, params: dict[str, str | int]) -> None:
         """Update parameters used in the '/messages' Graph API request.
 

@@ -585,7 +585,7 @@ class OutputWorkerCore(ABC):
         self._mkdir(
             self.export_opts.attachments_folder,
             "attachments",
-            parents=self.export_opts.attachments_mkdir,
+            parents=True,
         )
 
         attachment_path = unique_file_path(self.export_opts.attachments_folder / Path(attachment["name"]), file_date)
@@ -1232,7 +1232,7 @@ class OutputWorkerCore(ABC):
         The default implementation creates the files directory.
         """
         self.emit_log(f"Saving files to '{self.export_opts.files_dir}'")
-        self._mkdir(self.export_opts.files_dir, "files", parents=not self.export_opts.hier_flat)
+        self._mkdir(self.export_opts.files_dir, "files", parents=True)
 
         # Note: Attachments directory will be created the first time an attachment is saved.
         if self.export_opts.with_attachments:
@@ -1583,13 +1583,13 @@ class OutputWorkerCore(ABC):
         files_dir = self.export_opts.files_dir
         attachments_folder = self.export_opts.attachments_folder
         attachments_dir_path = Path(attachments_folder)  # assume it's an absolute path to start
-        attachments_mkdir = self.export_opts.attachments_mkdir
+        flat_attachments = self.export_opts.flat_attachments
         folder_tag_vars = self.get_folder_tag_vars()
 
         # If folder path is "A/B/C" write to "/C" if shallow is true.
-        folder_path_mkdir = self.folder_path if not self.export_opts.hier_shallow else Path(self.folder_path.parts[-1])
+        folder_path_mkdir = self.folder_path if not self.export_opts.shallow_files else Path(self.folder_path.parts[-1])
 
-        if not self.export_opts.hier_flat:
+        if not self.export_opts.flat_files:
             files_dir = files_dir / folder_path_mkdir
 
         if isinstance(attachments_folder, Path):
@@ -1597,19 +1597,19 @@ class OutputWorkerCore(ABC):
             assert attachments_dir_path.is_absolute()  # noqa: S101 ; caller should have verified!
         elif attachments_folder.upper() == ATTACHMENTS_FOLDER_ROOT:
             attachments_dir_path = self.export_opts.root_out_dir
-            attachments_mkdir = False
+            flat_attachments = True
         elif attachments_folder.upper().startswith(ATTACHMENTS_FOLDER_FILE):  # allow plural "FILES"
             attachments_dir_path = files_dir
-            attachments_mkdir = False
+            flat_attachments = True
         elif not attachments_dir_path.is_absolute():
             attachments_dir_path = files_dir / safe_file_name(attachments_folder, ATTACHMENTS_DEFAULT_FOLDER)
-            attachments_mkdir = False
+            flat_attachments = True
 
-        if attachments_mkdir:
+        if not flat_attachments:
             attachments_dir_path = attachments_dir_path / folder_path_mkdir
 
         self.export_opts.files_dir = files_dir
-        self.export_opts.attachments_mkdir = attachments_mkdir
+        self.export_opts.flat_attachments = flat_attachments
         self.export_opts.attachments_folder = attachments_dir_path
 
         self.export_opts.md_tags = self._expand_folder_tags(self.export_opts.md_tags, folder_tag_vars)

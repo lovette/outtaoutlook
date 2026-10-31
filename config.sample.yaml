@@ -78,7 +78,7 @@ export:
   dry_run: false
   with_attachments: true
   attachments_folder: "assets"
-  attachments_mkdir: true
+  flat_attachments: false
   maxdepth: 5
   shallow: true
   max_workers: 3

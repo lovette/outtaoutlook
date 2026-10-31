@@ -164,8 +164,8 @@ class OutputWorkerMbox(OutputWorkerQueued):
 
         mbox_dir = self.export_opts.root_out_dir
 
-        if not self.export_opts.hier_flat:
-            if len(self.folder_path.parts) > 1 and not self.export_opts.hier_shallow:
+        if not self.export_opts.flat_files:
+            if len(self.folder_path.parts) > 1 and not self.export_opts.shallow_files:
                 # If mail folder path is "A/B/C", set mbox path to "A/B/C.mbox".
                 mbox_dir = mbox_dir / Path(*self.folder_path.parts[:-1])
 
@@ -181,9 +181,6 @@ class OutputWorkerMbox(OutputWorkerQueued):
         if self.export_opts.with_attachments is None:
             # Only export attachments when explicitly asked
             self.export_opts.with_attachments = False
-
-        # Ensure that the attachments directory is created if attachments are being exported.
-        self.export_opts.attachments_mkdir = self.export_opts.with_attachments
 
     def update_messages_params(self: Self, params: dict[str, str | int]) -> None:
         """Update parameters used in the '/messages' Graph API request.
@@ -235,7 +232,7 @@ class OutputWorkerMbox(OutputWorkerQueued):
         if self.mbox_path.is_file():
             self.emit_log(f"Writing messages to existing mbox '{self.mbox_path}'", logging.INFO)
         else:
-            self._mkdir(self.mbox_path.parent, "mbox parent", parents=not self.export_opts.hier_flat)
+            self._mkdir(self.mbox_path.parent, "mbox parent", parents=not self.export_opts.flat_files)
             self.emit_log(f"Writing messages to new mbox '{self.mbox_path}'", logging.INFO)
 
         # Note: Attachments directory will be created the first time an attachment is saved.

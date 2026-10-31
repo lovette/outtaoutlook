@@ -62,19 +62,19 @@ class ExportOptions:
 
     out_format: OutputFormatChoice  # Output file format.
     attachments_folder: str | Path  # `ATTACHMENTS_FOLDER_*`, folder name or absolute path.
-    attachments_mkdir: bool  # Create mail folder hierarchy in attachments directory.
+    flat_attachments: bool  # Do not create mail folder hierarchy in external attachments directory.
     batch_size: int  # Number of messages to process in a batch.
     dry_run: bool  # Whether to perform a dry run without making any changes.
     filter_query: str | None  # --filter criteria from command line and config file.
     filter_test: bool  # Whether to perform a filter test without exporting.
     manifest_dir: Path | None  # Directory to write the manifest file.
-    hier_shallow: bool  # Use only the leaf of folder tree when creating mail folder hierarchy.
+    shallow_files: bool  # Use only the leaf of folder tree when creating mail folder hierarchy.
     md_body_tags: list[str] | None  # --body-tag tags from command line and config file.
     meta_props: FileMetaPropT | None  # --metaprop properties from command line and config file.
     md_tags: list[str] | None  # --tag tags from command line and config file.
     files_dir: Path  # Directory to save files (set internally.)
     export_limit: int  # Maximum number of files to export (per folder).
-    hier_flat: bool  # Write all files to root directory, do not preserve mail folder hierarchy.
+    flat_files: bool  # Write all files to root directory, do not preserve mail folder hierarchy.
     md_place_tags_body_end: bool  # True to place body tags at the end of the file instead the top.
     md_place_tags_frontmatter: bool  # True to place non-body tags in frontmatter.
     search_query: str | None  # --search criteria from command line and config file.
