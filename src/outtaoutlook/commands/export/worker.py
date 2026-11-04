@@ -383,6 +383,8 @@ def _start_workers(  # noqa: C901, PLR0912
                     # Exceptions not handled by the worker will be re-raised here.
                     future.result()
 
+            except KeyboardInterrupt:
+                ow.cancel_workers("Keyboard interrupt.")
             except concurrent.futures.CancelledError:
                 # This will never happen because we skip cancelled futures before calling result()
                 ow.set_cancelled("Worker result was a futures.CancelledError.")
