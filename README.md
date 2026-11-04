@@ -4,6 +4,8 @@
 
 OuttaOutlook is a Python command-line utility that gets your emails outta Microsoft Outlook and saves them locally in various file formats.
 
+![screenshot](assets/screenshot.gif)
+
 ## Key Features
 
 - Uses the [Microsoft Graph API](https://learn.microsoft.com/en-us/graph/use-the-api) to access Microsoft Outlook and Microsoft Exchange Server hosted mailboxes.
