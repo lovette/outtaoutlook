@@ -32,7 +32,7 @@ class OutputWorkerJson(OutputWorkerCore):
         Args:
             params (dict[str, str | int]): Dictionary of parameters to update.
         """
-        del params["$select"]  # We want all the fields
+        params.pop("$select", None)  # We want all the fields
 
     def get_file_path(
         self: Self,
